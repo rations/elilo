@@ -1,0 +1,17 @@
+#!/bin/sh
+# /etc/kernel/postinst.d/zz-update-elilo
+# Called by linux-run-hooks after a new kernel package is installed.
+# run-parts passes: $1 = kernel version, $2 = kernel image path
+
+set -e
+
+# Save kernel version before set -- overwrites positional parameters
+KERNEL_VERSION="$1"
+
+# Only act during a normal package configure (not abort-upgrade, etc.)
+set -- $DEB_MAINT_PARAMS
+mode="${1#\'}"
+[ "$mode" = "configure" ] || exit 0
+
+[ -x /usr/local/sbin/update-elilo ] || exit 0
+exec /usr/local/sbin/update-elilo "$KERNEL_VERSION"
