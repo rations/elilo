@@ -239,6 +239,12 @@ static VOID find_bits(unsigned long mask, UINT8 *first, UINT8* len) {
 
 /*
  * Get video information.
+ *
+ * Enumerates all GOP modes and switches to the highest-resolution mode that
+ * has a real linear framebuffer. UEFI firmware defaults to a safe POST
+ * resolution (typically 1024x768) which would lock the kernel's efifb driver
+ * to 4:3. Selecting the best available mode gives the kernel the native
+ * display resolution without requiring any kernel command-line parameters.
  */
 static INTN get_video_info(boot_params_t * bp) {
 	EFI_GUID GopProtocol = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
@@ -247,6 +253,8 @@ static INTN get_video_info(boot_params_t * bp) {
 	EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *Gop_mode;
 	EFI_STATUS efi_status;
 	UINTN size1;
+	UINT32 best_mode, i;
+	UINTN best_pixels;
 
 	if (x86_64_text_mode() == 1) {
 		Print(L"Skip GOP init, force text-mode.\n");
@@ -263,6 +271,42 @@ static INTN get_video_info(boot_params_t * bp) {
 	}
 
 	Gop_mode = Gop_interface->Mode;
+
+	/* Find the highest-resolution mode with a real linear framebuffer */
+	best_mode   = Gop_mode->Mode;
+	best_pixels = 0;
+
+	for (i = 0; i < Gop_mode->MaxMode; i++) {
+		EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info;
+		UINTN info_size;
+		UINTN pixels;
+
+		efi_status = uefi_call_wrapper(Gop_interface->QueryMode, 4,
+					       Gop_interface, i,
+					       &info_size, &info);
+		if (EFI_ERROR(efi_status))
+			continue;
+
+		/* PixelBltOnly has no linear framebuffer — skip it */
+		if (info->PixelFormat != PixelBltOnly) {
+			pixels = (UINTN)info->HorizontalResolution *
+				 (UINTN)info->VerticalResolution;
+			if (pixels > best_pixels) {
+				best_pixels = pixels;
+				best_mode   = i;
+			}
+		}
+
+		uefi_call_wrapper(BS->FreePool, 1, info);
+	}
+
+	/* Switch to the best mode if it differs from the current one */
+	if (best_mode != Gop_mode->Mode) {
+		efi_status = uefi_call_wrapper(Gop_interface->SetMode, 2,
+					       Gop_interface, best_mode);
+		/* On failure stay with whatever mode the firmware already set */
+	}
+
 	efi_status = uefi_call_wrapper(Gop_interface->QueryMode, 4,
 				       Gop_interface, Gop_mode->Mode,
 				       &size1, &Gop_info);
@@ -344,6 +388,7 @@ static INTN get_video_info(boot_params_t * bp) {
 		bp->s.lfb_rsvd_pos = 0;
 		bp->s.lfb_line_len = bp->s.lfb_width / 2;
 	}
+	uefi_call_wrapper(BS->FreePool, 1, Gop_info);
 	return 0;
 }
 

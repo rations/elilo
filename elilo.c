@@ -248,7 +248,7 @@ do_launch:
 
 	/* Give user time to see the output before launch */
 	if (elilo_opt.debug || elilo_opt.verbose) {
-		r = wait_timeout(150);
+		r = wait_timeout(30);
 	/* have to turn off all console output(except error output) now before final get_mmemap()
 	 * call or it can cause the efi map key to change and the ExitBootSvc call to fail,
 	 * forcing debug and verbose options off is the surest way to enforce this.
