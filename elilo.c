@@ -229,19 +229,13 @@ main_loop(EFI_HANDLE dev, CHAR16 **argv, INTN argc, INTN index, EFI_HANDLE image
 		elilo_opt.sys_img_opts = NULL;
 
 		if (kernel_chooser(argv, argc, index, kname, cmdline_tmp) == -1) {
-			Print(L"DBG: chooser returned -1, going to exit_error\n");
-			wait_timeout(200);
 			goto exit_error;
 		}
-		Print(L"DBG: chooser ok kname=%s\n", kname);
 
 		switch (kernel_load(image, kname, &kd, &imem, &mmem)) {
 			case ELILO_LOAD_SUCCESS:
-				Print(L"DBG: kernel_load SUCCESS\n");
 				goto do_launch;
 			case ELILO_LOAD_ERROR:
-				Print(L"DBG: kernel_load FAILED\n");
-				wait_timeout(200);
 				goto exit_error;
 			/* otherwise we retry ! */
 		}
@@ -263,25 +257,6 @@ do_launch:
 		elilo_opt.verbose=0; 
 	}
 
-	/* Diagnostic: show handover capability and candidate entry bytes */
-	{
-		UINTN hoff = (UINTN)BP_HANDOVER_OFFSET(param_start);
-		UINT8 *base = (UINT8 *)kernel_load_address;
-		/* A: body-relative+0, B: body-relative+512, C: file-relative+512 */
-		UINT8 *eA = base + hoff;
-		UINT8 *eB = base + hoff + 512;
-		UINT8 *eC = base + hoff - param_size + 512;
-		Print(L"DBG: hoff=0x%lx kload=0x%lx psize=0x%lx\n",
-		      hoff, (UINTN)kernel_load_address, (UINTN)param_size);
-		Print(L"  A(+0)   0x%lx: %02x %02x %02x %02x\n",
-		      (UINTN)eA, eA[0],eA[1],eA[2],eA[3]);
-		Print(L"  B(+512) 0x%lx: %02x %02x %02x %02x\n",
-		      (UINTN)eB, eB[0],eB[1],eB[2],eB[3]);
-		Print(L"  C(file+512) 0x%lx: %02x %02x %02x %02x\n",
-		      (UINTN)eC, eC[0],eC[1],eC[2],eC[3]);
-	}
-	wait_timeout(300);
-
 	/* free resources associated with file accesses (before ExitBootServices) */
 	close_devices();
 
@@ -294,10 +269,12 @@ do_launch:
 	 * Boot Services must remain ACTIVE when we call the handover entry.
 	 * On success this never returns; fall through to the legacy path if unsupported.
 	 */
+#ifdef CONFIG_x86_64
 	if (BP_XLOADFLAGS((boot_params_t *)bp) & XLF_EFI_HANDOVER_64) {
 		efi_handover_64(image, systab, (boot_params_t *)bp);
 		/* NOT REACHED if handover succeeded */
 	}
+#endif
 
 retry:
 	status = uefi_call_wrapper(BS->ExitBootServices, 2, image, cookie);

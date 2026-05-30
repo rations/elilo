@@ -1,3 +1,43 @@
+2026-05-30 rations <ehqcar@proton.me>
+	Developed with Claude Sonnet 4.6 (Anthropic) as AI development assistant.
+	* elilo 3.17 — modernisation for Linux 6.x / current UEFI firmware
+	* Make.rules: add -j .rodata to objcopy; GCC 12+ puts string literals
+	  there and they were silently dropped from the EFI binary.
+	* strops.h, strops.c: remove elilo's StrnCpy shadow declaration and
+	  implementation; conflicts with gnu-efi 3.0.18's VOID return type.
+	* x86_64/system.c: add (VOID **) cast to HandleProtocol call.
+	* x86_64/sysdeps.h: fix Memset macro — SetMem in libefi.a carries
+	  EFIAPI (MS x64 ABI); calling it from SysV code passed Size in the
+	  wrong register, zeroing nothing. Switch to ZeroMem which is SysV-safe.
+	  This was the root cause of the "(null) already defined" config error.
+	* x86_64/sysdeps.h: fix CopyMem macro — same MS ABI problem; route
+	  all CopyMem calls through uefi_call_wrapper to use the SysV→MS
+	  trampoline. Fixes silent corruption of the boot_params copy.
+	* config.c: fix config_error() to use VPrint with va_list; the previous
+	  IPrint call without variadic arguments printed (null) for all messages.
+	* fileops / netfs: fix file-read retry condition from != EFI_SUCCESS
+	  to (EFI_NOT_FOUND || EFI_TFTP_ERROR); normal short reads were
+	  triggering a restart from the beginning of the file.
+	* x86_64/system.c: set cmdline_addr to the actual command-line address;
+	  it was hardcoded to 0, leaving the kernel with no command line.
+	  Add LDRFLAG_CAN_USE_HEAP to loader_flags.
+	* x86_64/bzimage.c: replace fixed 8 MB kernel_size ceiling with
+	  init_size read from the kernel setup header (boot protocol offset
+	  0x260). The Debian 6.12 bzImage body is ~11.5 MB; the 8 MB limit
+	  truncated the load and the EFI stub at body+11.4 MB was never mapped.
+	* x86_64/sysdeps.h, elilo.c: implement EFI Handover Protocol
+	  (boot protocol 2.12+, kernels >= 3.3). The bootloader now keeps Boot
+	  Services active and calls the kernel's efi64_stub_entry directly,
+	  passing (image_handle, efi_system_table, boot_params). The kernel
+	  stub calls ExitBootServices itself. The old ExitBootServices +
+	  start_kernel path is retained as a fallback.
+	* x86_64/sysdeps.h: critical ABI fix — Linux 6.x removed the MS→SysV
+	  argument translation shim that older kernels had at efi64_stub_entry.
+	  The entry now expects SysV calling convention (rdi/rsi/rdx) directly.
+	  Removed __attribute__((ms_abi)) from the handover function pointer
+	  typedef; with -DEFI_FUNCTION_WRAPPER elilo is already SysV throughout.
+	  This was the fix that made the kernel actually boot.
+
 2011-1-10 signed off by Jason Fleischli <jason.fleischli@hp.com>
 	* Uptake of SUSE patches
 	- add sysfs support for efi vars (formerly /proc/efi/vars)

@@ -1,0 +1,8 @@
+# Build outputs
+*.o
+*.so
+*.efi
+tools/eliloalt
+
+# Downloaded packages kept for reference — install via: apt-get install gnu-efi
+*.deb
