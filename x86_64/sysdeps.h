@@ -38,9 +38,16 @@
 #define ELILO_ARCH	"x86_64" /* ASCII string */
 #define PADDR_MASK	0xfffffff
 
-/* for now use library versions */
-#define Memset(a,v,n)	SetMem((a),(n),(v))
-#define Memcpy(a,b,n)	CopyMem((a),(b),(n))
+/*
+ * ZeroMem has no EFIAPI in libefi.a → uses SysV ABI → safe to call directly.
+ * CopyMem and SetMem have EFIAPI (MS ABI) → must use efi_callN trampoline.
+ * All existing Memset call sites pass value=0, so ZeroMem is correct.
+ * Redefining CopyMem as a macro is safe: the preprocessor does not
+ * re-expand a macro name that appears inside its own replacement list.
+ */
+#define Memset(a,v,n)  ZeroMem((a),(n))
+#define Memcpy(a,b,n)  uefi_call_wrapper(CopyMem, 3, (a), (b), (n))
+#define CopyMem(d,s,n) uefi_call_wrapper(CopyMem, 3, (d), (s), (n))
 
 /* Put initrd to far away from kernel image to avoid conflict.
  * May need to adjust this number if it is not big enough.
@@ -480,7 +487,12 @@ typedef struct sys_img_options {
 /*
  * Call the kernel's 64-bit EFI handover entry point.
  * Boot Services must still be ACTIVE — the kernel stub calls ExitBootServices.
- * Uses Microsoft x64 ABI (rcx=handle, rdx=table, r8=bp), matching -mabi=ms.
+ *
+ * Linux 6.x efi64_stub_entry uses SysV ABI (rdi=handle, rsi=table, rdx=bp).
+ * In older kernels (< ~5.x) the entry had an MS→SysV shim; that shim was
+ * removed in modern kernels, so we must NOT use __attribute__((ms_abi)) here.
+ * elilo is compiled with SysV (via -DEFI_FUNCTION_WRAPPER), so a plain call
+ * already puts args in rdi/rsi/rdx — exactly what the kernel expects.
  */
 static inline void
 efi_handover_64(EFI_HANDLE image, EFI_SYSTEM_TABLE *table, boot_params_t *bp)
@@ -488,8 +500,15 @@ efi_handover_64(EFI_HANDLE image, EFI_SYSTEM_TABLE *table, boot_params_t *bp)
 	typedef void (*handover_fn)(void *handle,
 	                            EFI_SYSTEM_TABLE *table,
 	                            boot_params_t *params);
+	/*
+	 * handover_offset is the 32-bit EFI entry; the 64-bit entry is
+	 * always 512 bytes later (Linux boot protocol, Documentation/x86/boot.rst).
+	 * kernel_load_address is the base of the compressed kernel body
+	 * (bzImage without setup portion), which is the correct base for
+	 * handover_offset per the boot protocol.
+	 */
 	handover_fn entry = (handover_fn)
-		((UINT8 *)kernel_load_address + BP_HANDOVER_OFFSET(bp));
+		((UINT8 *)kernel_load_address + BP_HANDOVER_OFFSET(bp) + 512);
 	entry((void *)image, table, bp);
 	/* NOT REACHED */
 }

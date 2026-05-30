@@ -206,11 +206,14 @@ static UINTN buf_max, buf_pos;
 
 static fops_fd_t config_fd;
 
-static VOID 
+static VOID
 config_error(CHAR16 *msg,...)
 {
-    Print(L"near line %d: ",line_num);
-    IPrint(systab->ConOut, msg);
+    va_list args;
+    Print(L"near line %d: ", line_num);
+    va_start(args, msg);
+    VPrint(msg, args);
+    va_end(args);
     Print(L"\n");
 }
 

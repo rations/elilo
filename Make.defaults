@@ -108,7 +108,7 @@ OBJCOPY	        = $(prefix)objcopy
 
 # Use Modified binutils that supports x86_64 using UEFI ABI
 ifeq ($(ARCH), x86_64)
-        CFLAGS   += -DGNU_EFI_USE_MS_ABI -mabi=ms
+        CFLAGS   += -DEFI_FUNCTION_WRAPPER
 	OBJCOPY	  = /usr/bin/objcopy
 endif
 
