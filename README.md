@@ -137,15 +137,17 @@ sudo mkdir -p /boot/efi/EFI/elilo
 # Install the bootloader binary
 sudo cp elilo.efi /boot/efi/EFI/elilo/elilo.efi
 
-# Copy the kernel and initrd to the ESP
-# Replace the kernel version with the one you are installing
-sudo cp /boot/vmlinuz-6.12.90+deb13-amd64   /boot/efi/EFI/elilo/vmlinuz
-sudo cp /boot/initrd.img-6.12.90+deb13-amd64 /boot/efi/EFI/elilo/initrd.img
+# Copy the kernel and initrd to the ESP, keeping the versioned filename
+# Replace the version string with the output of: uname -r
+sudo cp /boot/vmlinuz-6.12.90+deb13-amd64    /boot/efi/EFI/elilo/vmlinuz-6.12.90+deb13-amd64
+sudo cp /boot/initrd.img-6.12.90+deb13-amd64 /boot/efi/EFI/elilo/initrd.img-6.12.90+deb13-amd64
 ```
 
 > **Note:** elilo reads the kernel and initrd from the ESP (FAT32). The files
-> must be copied there. Symlinks are not supported on FAT32 — copy the actual
-> files. When the kernel is upgraded, you must copy the new files manually (see
+> must be copied there — symlinks are not supported on FAT32. Use the versioned
+> filename (e.g. `vmlinuz-6.12.90+deb13-amd64`) rather than a generic name so
+> it is always clear which kernel version is on the ESP. When the kernel is
+> upgraded, you must copy the new files and update `elilo.conf` manually (see
 > [Keeping elilo Up to Date](#keeping-elilo-up-to-date-after-a-kernel-upgrade)).
 
 Then write the config file (see next section) and copy it:
@@ -189,13 +191,14 @@ prompt
 timeout=50
 default=linux
 
-image=/EFI/elilo/vmlinuz
+image=/EFI/elilo/vmlinuz-6.12.90+deb13-amd64
   label=linux
-  initrd=/EFI/elilo/initrd.img
+  initrd=/EFI/elilo/initrd.img-6.12.90+deb13-amd64
   root=/dev/sda2
   append="ro quiet"
 ```
 
+Replace `6.12.90+deb13-amd64` with your actual kernel version (`uname -r`).
 If your root partition is on a second drive or a different partition number,
 change `root=` accordingly — for example `root=/dev/sdb3`.
 
@@ -215,14 +218,17 @@ prompt
 timeout=50
 default=linux
 
-image=/EFI/elilo/vmlinuz
+image=/EFI/elilo/vmlinuz-6.12.90+deb13-amd64
   label=linux
-  initrd=/EFI/elilo/initrd.img
+  initrd=/EFI/elilo/initrd.img-6.12.90+deb13-amd64
   root=/dev/nvme0n1p2
   append="ro quiet"
 ```
 
-For a second NVMe drive use `nvme1n1p2`, and so on.
+Replace `6.12.90+deb13-amd64` with your actual kernel version (`uname -r`).
+For a second NVMe drive use `nvme1n1p2`, and so on. If your root partition is
+on a different partition number, change `root=` accordingly — for example
+`root=/dev/nvme0n1p3`.
 
 ---
 
@@ -239,12 +245,17 @@ prompt
 timeout=50
 default=linux
 
-image=/EFI/elilo/vmlinuz
+image=/EFI/elilo/vmlinuz-6.12.90+deb13-amd64
   label=linux
-  initrd=/EFI/elilo/initrd.img
+  initrd=/EFI/elilo/initrd.img-6.12.90+deb13-amd64
   root=/dev/mmcblk0p2
   append="ro quiet"
 ```
+
+Replace `6.12.90+deb13-amd64` with your actual kernel version (`uname -r`).
+For a second eMMC device use `mmcblk1p2`. If your root partition is on a
+different partition number, change `root=` accordingly — for example
+`root=/dev/mmcblk0p3`.
 
 ---
 
@@ -256,20 +267,25 @@ prompt
 timeout=50
 default=linux
 
-image=/EFI/elilo/vmlinuz
+image=/EFI/elilo/vmlinuz-6.13.5+deb13-amd64
   label=linux
-  description="Devuan Linux (current)"
-  initrd=/EFI/elilo/initrd.img
+  description="Devuan Linux 6.13 (current)"
+  initrd=/EFI/elilo/initrd.img-6.13.5+deb13-amd64
   root=/dev/sda2
   append="ro quiet"
 
-image=/EFI/elilo/vmlinuz.old
+image=/EFI/elilo/vmlinuz-6.12.90+deb13-amd64
   label=linux.old
-  description="Devuan Linux (previous)"
-  initrd=/EFI/elilo/initrd.img.old
+  description="Devuan Linux 6.12 (previous)"
+  initrd=/EFI/elilo/initrd.img-6.12.90+deb13-amd64
   root=/dev/sda2
   append="ro quiet"
 ```
+
+Replace the version strings with your current and previous kernel versions
+(`uname -r` gives the running version). Change `root=` to match your actual
+root partition — for example `root=/dev/nvme0n1p2` or `root=/dev/mmcblk0p2`
+for NVMe or eMMC systems.
 
 ---
 
@@ -360,13 +376,9 @@ You will see both the old and new versions, for example:
 **Step 2 — Copy the new kernel to the ESP:**
 
 ```bash
-# Optional: keep the old kernel as a fallback
-sudo cp /boot/efi/EFI/elilo/vmlinuz   /boot/efi/EFI/elilo/vmlinuz.old
-sudo cp /boot/efi/EFI/elilo/initrd.img /boot/efi/EFI/elilo/initrd.img.old
-
-# Copy the new kernel (replace version string with your actual new version)
-sudo cp /boot/vmlinuz-6.13.5+deb13-amd64    /boot/efi/EFI/elilo/vmlinuz
-sudo cp /boot/initrd.img-6.13.5+deb13-amd64  /boot/efi/EFI/elilo/initrd.img
+# Copy the new kernel using the versioned filename (replace version string with your actual new version)
+sudo cp /boot/vmlinuz-6.13.5+deb13-amd64    /boot/efi/EFI/elilo/vmlinuz-6.13.5+deb13-amd64
+sudo cp /boot/initrd.img-6.13.5+deb13-amd64 /boot/efi/EFI/elilo/initrd.img-6.13.5+deb13-amd64
 ```
 
 **Step 3 — Verify the copy succeeded:**
@@ -378,14 +390,25 @@ ls -lh /boot/efi/EFI/elilo/
 Confirm the file sizes match:
 
 ```bash
-ls -lh /boot/vmlinuz-6.13.5+deb13-amd64 /boot/efi/EFI/elilo/vmlinuz
+ls -lh /boot/vmlinuz-6.13.5+deb13-amd64 /boot/efi/EFI/elilo/vmlinuz-6.13.5+deb13-amd64
 ```
 
-**Step 4 — Update elilo.conf if needed:**
+**Step 4 — Update elilo.conf:**
 
-If you use versioned filenames in `elilo.conf` (rather than the generic
-`vmlinuz` / `initrd.img` names shown in the examples above) you must update the
-`image=` and `initrd=` lines to point to the new filenames.
+Update the `image=` and `initrd=` lines in `/boot/efi/EFI/elilo/elilo.conf` to
+point to the new versioned filenames:
+
+```
+image=/EFI/elilo/vmlinuz-6.13.5+deb13-amd64
+  label=linux
+  initrd=/EFI/elilo/initrd.img-6.13.5+deb13-amd64
+  root=/dev/sda2
+  append="ro quiet"
+```
+
+You can keep the old kernel as a second entry (change `label=` to something like
+`linux.old`) until you are confident the new kernel boots correctly, then remove
+it on the next upgrade.
 
 > **If elilo fails to boot after a kernel upgrade:** select GRUB (or your
 > previous boot entry) from the UEFI firmware menu to boot the old kernel while
