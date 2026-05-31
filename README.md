@@ -19,6 +19,7 @@ for the full list of copyright holders.
 1. [Requirements](#requirements)
 2. [Building from Source](#building-from-source)
 3. [Installation](#installation)
+   - [Quick Install (Devuan/Debian)](#quick-install-devuandebian)
    - [Coexisting with GRUB](#coexisting-with-grub)
    - [Finding Your EFI System Partition](#finding-your-efi-system-partition)
    - [Installing the Bootloader Files](#installing-the-bootloader-files)
@@ -61,6 +62,36 @@ This produces `elilo.efi` in the top-level directory.
 ---
 
 ## Installation
+
+### Quick Install (Devuan/Debian)
+
+The easiest way to install elilo is with the included installer script. It
+auto-detects your ESP, root device, and disk layout, then handles everything
+in one command:
+
+```bash
+tar xzf elilo-3.17-devuan.tar.gz
+cd elilo-3.17-devuan
+sudo ./install-elilo.sh
+```
+
+The script will:
+
+- Create `/boot/efi/EFI/elilo/` and copy `elilo.efi`
+- Install `update-elilo` to `/usr/local/sbin/` and the kernel hooks to
+  `/etc/kernel/{postinst,postrm}.d/` so every future `apt upgrade` updates
+  elilo automatically
+- Write `/etc/elilo/update.conf` with your detected `ROOT_DEV` and `ELILO_DIR`
+- Copy the current kernel and initrd to the ESP and generate `elilo.conf`
+- Register an `elilo` UEFI boot entry via `efibootmgr`
+
+Review `/etc/elilo/update.conf` after the install if you want to adjust any
+settings, then reboot to test.
+
+> If you prefer to install step by step — or are on a non-Debian distro — see
+> the manual installation sections below.
+
+---
 
 ### Coexisting with GRUB
 
