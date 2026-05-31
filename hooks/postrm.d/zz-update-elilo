@@ -3,8 +3,6 @@
 # Called by linux-run-hooks after a kernel package is removed.
 # run-parts passes: $1 = kernel version, $2 = kernel image path
 
-set -e
-
 KERNEL_VERSION="$1"
 
 [ -n "$KERNEL_VERSION" ] || exit 0
@@ -18,10 +16,14 @@ ELILO_DIR=/boot/efi/EFI/elilo
 ESP_ROOT=$(echo "$ELILO_DIR" | sed 's|/EFI/.*||')
 mountpoint -q "$ESP_ROOT" 2>/dev/null || exit 0
 
-# Remove the kernel and initrd for the removed version from the ESP
+# Remove the kernel and initrd for the removed version from the ESP.
+# Do not let a failure here abort the kernel removal.
 rm -f "$ELILO_DIR/vmlinuz-$KERNEL_VERSION"
 rm -f "$ELILO_DIR/initrd.img-$KERNEL_VERSION"
 echo "update-elilo: removed $KERNEL_VERSION from ESP"
 
-# Regenerate elilo.conf to reflect what remains
-exec /usr/local/sbin/update-elilo
+# Regenerate elilo.conf to reflect what remains.
+/usr/local/sbin/update-elilo || \
+    echo "update-elilo: WARNING: config regeneration failed — run 'sudo update-elilo' manually" >&2
+
+exit 0

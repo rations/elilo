@@ -2,16 +2,23 @@
 # /etc/kernel/postinst.d/zz-update-elilo
 # Called by linux-run-hooks after a new kernel package is installed.
 # run-parts passes: $1 = kernel version, $2 = kernel image path
-
-set -e
+#
+# To test manually (simulating a kernel install):
+#   DEB_MAINT_PARAMS="'configure'" /etc/kernel/postinst.d/zz-update-elilo 6.12.90+deb13-amd64
 
 # Save kernel version before set -- overwrites positional parameters
 KERNEL_VERSION="$1"
 
 # Only act during a normal package configure (not abort-upgrade, etc.)
+# DEB_MAINT_PARAMS is set by the dpkg maintainer script environment.
 set -- $DEB_MAINT_PARAMS
 mode="${1#\'}"
 [ "$mode" = "configure" ] || exit 0
 
 [ -x /usr/local/sbin/update-elilo ] || exit 0
-exec /usr/local/sbin/update-elilo "$KERNEL_VERSION"
+
+# Do not let a failure here abort the kernel installation.
+/usr/local/sbin/update-elilo "$KERNEL_VERSION" || \
+    echo "update-elilo: WARNING: update failed — run 'sudo update-elilo' manually" >&2
+
+exit 0
