@@ -24,11 +24,12 @@ for the full list of copyright holders.
    - [Installing the Bootloader Files](#installing-the-bootloader-files)
    - [Writing elilo.conf](#writing-eliloconf)
    - [Registering with the UEFI Boot Manager](#registering-with-the-uefi-boot-manager)
-4. [Keeping elilo Up to Date After a Kernel Upgrade](#keeping-elilo-up-to-date-after-a-kernel-upgrade)
-5. [Partition Naming Reference](#partition-naming-reference)
-6. [Changes from 3.14](#changes-from-314)
-7. [Comparison with Slackware 15.0](#comparison-with-slackware-150)
-8. [License & Credits](#license--credits)
+4. [Automatic Kernel Updates](#automatic-kernel-updates)
+5. [Manual Kernel Updates](#manual-kernel-updates)
+6. [Partition Naming Reference](#partition-naming-reference)
+7. [Changes from 3.14](#changes-from-314)
+8. [Comparison with Slackware 15.0](#comparison-with-slackware-150)
+9. [License & Credits](#license--credits)
 
 ---
 
@@ -348,15 +349,87 @@ firmware will offer both elilo and any existing entries (e.g. GRUB).
 
 ---
 
-## Keeping elilo Up to Date After a Kernel Upgrade
+## Automatic Kernel Updates
 
-> **Warning:** elilo reads the kernel and initrd by filename from the ESP.
-> Unlike GRUB, it does not use symlinks or automatically find new kernels.
-> After every kernel upgrade you must manually copy the new files to the ESP
-> and update `elilo.conf` if the filename changes. Failure to do this will
-> cause elilo to boot the old kernel or fail to find the kernel entirely.
+The most common complaint about elilo is being locked out after a kernel
+upgrade. The `update-elilo` script and kernel hooks in the `scripts/` and
+`hooks/` directories solve this: install them once and `apt upgrade` will
+automatically copy the new kernel to the ESP and regenerate `elilo.conf`,
+exactly as GRUB runs `update-grub`.
 
-After a kernel upgrade (e.g. via `apt upgrade`):
+### How it works
+
+Debian/Devuan/Ubuntu run every script in `/etc/kernel/postinst.d/` after each
+kernel package install, passing the new version as `$1`. The `zz-update-elilo`
+hook calls `update-elilo`, which copies the kernel and initrd to the ESP and
+rewrites `elilo.conf` with the new kernel as default and the previous kernel
+as a fallback entry. When a kernel is removed, the postrm hook deletes its
+files from the ESP and regenerates the config.
+
+### One-time setup
+
+**Step 1 — Install update-elilo:**
+
+```bash
+sudo cp scripts/update-elilo /usr/local/sbin/update-elilo
+sudo chmod 755 /usr/local/sbin/update-elilo
+```
+
+**Step 2 — Create the config directory and edit the config:**
+
+```bash
+sudo mkdir -p /etc/elilo
+sudo cp scripts/elilo-update.conf /etc/elilo/update.conf
+sudo nano /etc/elilo/update.conf
+```
+
+Set these values to match your system:
+
+```sh
+ELILO_DIR=/boot/efi/EFI/elilo   # where elilo.efi lives on the ESP
+ROOT_DEV=/dev/sda2               # your root partition (uname -r gives kernel; findmnt -n -o SOURCE / gives root)
+APPEND="ro quiet"                # kernel parameters
+```
+
+**Step 3 — Install the kernel hooks:**
+
+```bash
+sudo cp hooks/postinst.d/zz-update-elilo /etc/kernel/postinst.d/zz-update-elilo
+sudo cp hooks/postrm.d/zz-update-elilo   /etc/kernel/postrm.d/zz-update-elilo
+sudo chmod 755 /etc/kernel/postinst.d/zz-update-elilo
+sudo chmod 755 /etc/kernel/postrm.d/zz-update-elilo
+```
+
+**Step 4 — Run update-elilo once to generate the initial config:**
+
+```bash
+sudo update-elilo
+```
+
+This copies the current kernel to the ESP and writes `elilo.conf`. From this
+point on, `apt upgrade` handles everything automatically.
+
+> **Note:** `update-elilo` regenerates `elilo.conf` completely. If you have
+> custom entries in your existing `elilo.conf` (e.g. dual-boot, extra
+> parameters), back it up first and migrate any custom settings to
+> `/etc/elilo/update.conf` before running it.
+
+### Other distributions
+
+The `update-elilo` script itself is distro-agnostic. The hooks above are for
+Debian/Devuan/Ubuntu only. On Fedora/RHEL/openSUSE, install the hook to
+`/etc/kernel/install.d/` instead. On Arch, create a pacman hook. On any
+distro you can run `sudo update-elilo` manually after each kernel upgrade.
+
+---
+
+## Manual Kernel Updates
+
+> **Warning:** Without the automatic hooks above, elilo reads the kernel and
+> initrd by filename from the ESP and has no way to find new kernels on its own.
+> After every kernel upgrade you must manually copy the new files and update
+> `elilo.conf`. Failure to do this will cause elilo to boot the old kernel or
+> fail to find the kernel entirely.
 
 **Step 1 — Identify the new kernel:**
 
@@ -376,27 +449,17 @@ You will see both the old and new versions, for example:
 **Step 2 — Copy the new kernel to the ESP:**
 
 ```bash
-# Copy the new kernel using the versioned filename (replace version string with your actual new version)
 sudo cp /boot/vmlinuz-6.13.5+deb13-amd64    /boot/efi/EFI/elilo/vmlinuz-6.13.5+deb13-amd64
 sudo cp /boot/initrd.img-6.13.5+deb13-amd64 /boot/efi/EFI/elilo/initrd.img-6.13.5+deb13-amd64
 ```
 
-**Step 3 — Verify the copy succeeded:**
+Replace `6.13.5+deb13-amd64` with your actual new kernel version (`uname -r`
+on the running system gives the current version; the new one will be visible
+in `ls /boot/vmlinuz-*`).
 
-```bash
-ls -lh /boot/efi/EFI/elilo/
-```
+**Step 3 — Update elilo.conf:**
 
-Confirm the file sizes match:
-
-```bash
-ls -lh /boot/vmlinuz-6.13.5+deb13-amd64 /boot/efi/EFI/elilo/vmlinuz-6.13.5+deb13-amd64
-```
-
-**Step 4 — Update elilo.conf:**
-
-Update the `image=` and `initrd=` lines in `/boot/efi/EFI/elilo/elilo.conf` to
-point to the new versioned filenames:
+Update the `image=` and `initrd=` lines in `/boot/efi/EFI/elilo/elilo.conf`:
 
 ```
 image=/EFI/elilo/vmlinuz-6.13.5+deb13-amd64
@@ -406,9 +469,8 @@ image=/EFI/elilo/vmlinuz-6.13.5+deb13-amd64
   append="ro quiet"
 ```
 
-You can keep the old kernel as a second entry (change `label=` to something like
-`linux.old`) until you are confident the new kernel boots correctly, then remove
-it on the next upgrade.
+Keep the old kernel as a second entry (label `linux-old`) until the new kernel
+boots correctly, then remove it on the next upgrade.
 
 > **If elilo fails to boot after a kernel upgrade:** select GRUB (or your
 > previous boot entry) from the UEFI firmware menu to boot the old kernel while
