@@ -70,7 +70,7 @@ auto-detects your ESP, root device, and disk layout, then handles everything
 in one command:
 
 ```bash
-tar xzf elilo-3.17-devuan.tar.gz
+tar -xf elilo-3.17-devuan.tar.gz
 cd elilo-3.17-devuan
 sudo ./install-elilo.sh
 ```
