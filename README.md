@@ -25,6 +25,7 @@ for the full list of copyright holders.
    - [Installing the Bootloader Files](#installing-the-bootloader-files)
    - [Writing elilo.conf](#writing-eliloconf)
    - [Registering with the UEFI Boot Manager](#registering-with-the-uefi-boot-manager)
+   - [Checking and setting the boot order](#checking-and-setting-the-boot-order)
 4. [Automatic Kernel Updates](#automatic-kernel-updates)
 5. [Manual Kernel Updates](#manual-kernel-updates)
 6. [Partition Naming Reference](#partition-naming-reference)
@@ -70,8 +71,8 @@ auto-detects your ESP, root device, and disk layout, then handles everything
 in one command:
 
 ```bash
-tar -xf elilo-3.17-devuan.tar.gz
-cd elilo-3.17-devuan
+tar -xf elilo-3.17.2-devuan.tar.gz
+cd elilo-3.17.2-devuan
 sudo ./install-elilo.sh
 ```
 
@@ -87,6 +88,12 @@ The script will:
 
 Review `/etc/elilo/update.conf` after the install if you want to adjust any
 settings, then reboot to test.
+
+> **Check the boot order before rebooting.** Creating a boot entry does not
+> guarantee the firmware tries it first, and if an `elilo` entry already exists
+> the installer skips `efibootmgr` entirely. Run `efibootmgr -v` and, if elilo
+> is not first in `BootOrder`, set it first with `sudo efibootmgr --bootorder
+> XXXX` — see [Checking and setting the boot order](#checking-and-setting-the-boot-order).
 
 > If you prefer to install step by step — or are on a non-Debian distro — see
 > the manual installation sections below.
@@ -377,6 +384,51 @@ efibootmgr -v
 
 The new entry will appear in the boot order list. On the next reboot your
 firmware will offer both elilo and any existing entries (e.g. GRUB).
+
+### Checking and setting the boot order
+
+Creating a boot entry does **not** guarantee the firmware will try it first.
+On most machines `efibootmgr --create` (and the installer) puts the new `elilo`
+entry at the top of the boot order automatically. Some firmware does not — it
+adds the entry but leaves it behind the existing default, so the machine keeps
+booting whatever was first (GRUB, the firmware fallback, etc.). This has been
+seen on eMMC/SD (`mmcblk`) systems in particular, but it is firmware-specific
+and can happen on any machine — so always verify after installing.
+
+> Note: if an `elilo` boot entry already exists, the installer skips
+> `efibootmgr` and therefore does not touch the boot order at all. After a
+> re-install you must check and, if needed, fix the order yourself.
+
+Check the current order:
+
+```bash
+efibootmgr -v
+```
+
+The `BootOrder:` line near the top lists entry numbers in the order the firmware
+tries them, for example:
+
+```
+BootOrder: 0003,0001,2001
+Boot0001* elilo	HD(1,GPT,...)/File(\EFI\elilo\elilo.efi)
+Boot0003* debian	HD(1,GPT,...)/File(\EFI\debian\grubx64.efi)
+```
+
+Find elilo's four-digit number (here `0001`). If it is not first, move it to the
+front — list the remaining entries after it so they stay available as fallbacks:
+
+```bash
+# Replace XXXX with elilo's number, then the others in your preferred order
+sudo efibootmgr --bootorder XXXX,0003,2001
+```
+
+To make the firmware try only elilo first, you can pass just its number:
+
+```bash
+sudo efibootmgr --bootorder XXXX
+```
+
+Re-run `efibootmgr -v` to confirm the new order, then reboot.
 
 ---
 

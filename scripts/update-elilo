@@ -27,13 +27,35 @@ KEEP_PREVIOUS="${KEEP_PREVIOUS:-1}"
 TIMEOUT="${TIMEOUT:-50}"
 PROMPT="${PROMPT:-1}"
 
+# ── Version-aware kernel listing helper ─────────────────────────────────────
+# kernel_versions DIR
+#   Print the version suffix of every vmlinuz-* in DIR, one per line, sorted
+#   highest version first. Operates only on the suffix after "vmlinuz-", so
+#   version metacharacters (+ ~ - +debNN) sort correctly. Prefers Debian's
+#   linux-version (from linux-base); falls back to GNU sort -V.
+kernel_versions() {
+    dir=$1
+    for img in "$dir"/vmlinuz-*; do
+        [ -e "$img" ] || continue
+        base=${img##*/}
+        printf '%s\n' "${base#vmlinuz-}"
+    done | {
+        if command -v linux-version >/dev/null 2>&1; then
+            linux-version sort --reverse
+        else
+            sort -V -r
+        fi
+    }
+}
+
 # ── Determine kernel version ────────────────────────────────────────────────
 
 if [ -n "$1" ]; then
+    # Explicit version from the postinst hook (or manual invocation).
     NEW_VERSION="$1"
 else
-    # Find the newest kernel in /boot by modification time
-    NEW_VERSION=$(ls -t /boot/vmlinuz-* 2>/dev/null | head -1 | sed 's|/boot/vmlinuz-||')
+    # Highest installed kernel VERSION in /boot (not newest mtime).
+    NEW_VERSION=$(kernel_versions /boot | head -1)
 fi
 
 if [ -z "$NEW_VERSION" ]; then
@@ -57,26 +79,47 @@ fi
 
 # ── Copy kernel and initrd to ESP ────────────────────────────────────────────
 
-if [ -f "/boot/vmlinuz-$NEW_VERSION" ]; then
-    install -m 644 "/boot/vmlinuz-$NEW_VERSION" "$ELILO_DIR/vmlinuz-$NEW_VERSION"
-    echo "update-elilo: copied vmlinuz-$NEW_VERSION to $ELILO_DIR"
-else
-    echo "update-elilo: /boot/vmlinuz-$NEW_VERSION not found, skipping copy" >&2
+# Fail loud if the requested/selected kernel image does not exist — do NOT
+# proceed to overwrite a working elilo.conf with a broken one.
+if [ ! -f "/boot/vmlinuz-$NEW_VERSION" ]; then
+    echo "update-elilo: ERROR: /boot/vmlinuz-$NEW_VERSION does not exist" >&2
+    echo "  Refusing to regenerate $ELILO_CONF. No changes made." >&2
+    exit 1
 fi
 
-if [ -f "/boot/initrd.img-$NEW_VERSION" ]; then
-    install -m 644 "/boot/initrd.img-$NEW_VERSION" "$ELILO_DIR/initrd.img-$NEW_VERSION"
-    echo "update-elilo: copied initrd.img-$NEW_VERSION to $ELILO_DIR"
+install -m 644 "/boot/vmlinuz-$NEW_VERSION" "$ELILO_DIR/vmlinuz-$NEW_VERSION"
+echo "update-elilo: copied vmlinuz-$NEW_VERSION to $ELILO_DIR"
+
+# Locate the matching initrd. The standard Debian path is
+# /boot/initrd.img-$VERSION; probe a couple of common variants too.
+NEW_INITRD=""
+for cand in \
+    "/boot/initrd.img-$NEW_VERSION" \
+    "/boot/initrd-$NEW_VERSION.img" \
+    "/boot/initramfs-$NEW_VERSION.img"; do
+    if [ -f "$cand" ]; then
+        NEW_INITRD="$cand"
+        break
+    fi
+done
+
+if [ -n "$NEW_INITRD" ]; then
+    install -m 644 "$NEW_INITRD" "$ELILO_DIR/initrd.img-$NEW_VERSION"
+    echo "update-elilo: copied $(basename "$NEW_INITRD") to $ELILO_DIR/initrd.img-$NEW_VERSION"
+else
+    echo "update-elilo: WARNING: no initrd found for $NEW_VERSION in /boot" >&2
+    echo "  A normal Devuan/Debian system will NOT boot without an initrd." >&2
+    echo "  Run: update-initramfs -c -k $NEW_VERSION, then re-run update-elilo." >&2
 fi
 
 # ── Find previous kernel on ESP (for fallback entry) ─────────────────────────
 
 PREV_VERSION=""
 if [ "$KEEP_PREVIOUS" = "1" ]; then
-    PREV_VERSION=$(ls -t "$ELILO_DIR"/vmlinuz-* 2>/dev/null \
-        | grep -Fv "vmlinuz-$NEW_VERSION" \
-        | head -1 \
-        | sed "s|$ELILO_DIR/vmlinuz-||")
+    # Highest installed VERSION on the ESP that is not the new one.
+    PREV_VERSION=$(kernel_versions "$ELILO_DIR" \
+        | grep -Fxv "$NEW_VERSION" \
+        | head -1)
 fi
 
 # ── Determine EFI path prefix for elilo.conf ─────────────────────────────────
@@ -130,10 +173,12 @@ echo "update-elilo: wrote $ELILO_CONF (default: linux = $NEW_VERSION)"
 
 # ── Remove kernels older than the previous one ───────────────────────────────
 
-ls -t "$ELILO_DIR"/vmlinuz-* 2>/dev/null \
+# Keep only the two highest VERSIONS on the ESP (current + previous);
+# remove everything below, regardless of mtime.
+kernel_versions "$ELILO_DIR" \
     | tail -n +3 \
-    | while read OLD; do
-        OLD_VERSION=$(echo "$OLD" | sed "s|$ELILO_DIR/vmlinuz-||")
+    | while read -r OLD_VERSION; do
+        [ -n "$OLD_VERSION" ] || continue
         echo "update-elilo: removing old kernel $OLD_VERSION from ESP"
         rm -f "$ELILO_DIR/vmlinuz-$OLD_VERSION"
         rm -f "$ELILO_DIR/initrd.img-$OLD_VERSION"
