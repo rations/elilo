@@ -1,3 +1,31 @@
+2026-06-23 rations <ehqcar@proton.me>
+	* elilo 3.17.2 — Linux 7.x support and update-elilo robustness
+	* scripts/update-elilo: select kernels by VERSION, not file mtime.
+	  Added a kernel_versions() helper that lists installed kernels
+	  highest version first using Debian's linux-version utility, falling
+	  back to GNU sort -V. The previous `ls -t /boot/vmlinuz-* | head -1`
+	  picked the most recently modified kernel, so on a machine with both
+	  a 6.18.x and a 7.x kernel installed it chose 6.18.x instead of the
+	  newer 7.x. The version-aware logic now drives current-kernel
+	  selection, the previous/fallback entry, and pruning of old kernels
+	  on the ESP.
+	* scripts/update-elilo: fail loud instead of writing a broken config.
+	  A missing /boot/vmlinuz-$VERSION now aborts (exit 1) rather than
+	  overwriting a working elilo.conf with an entry for a kernel that was
+	  never copied to the ESP.
+	* scripts/update-elilo: robust initrd discovery. Probe initrd.img-,
+	  initrd- and initramfs- name variants; if the kernel exists but no
+	  initrd is found, emit a clear warning (an initrd-less entry will not
+	  boot a normal Devuan/Debian system) instead of silently writing a
+	  config with no initrd= line. Fixes the "stopped looking for
+	  initrd.img" failure seen when updating to a 7.x kernel manually.
+	* README.md: document checking and setting the UEFI boot order with
+	  efibootmgr -v / efibootmgr --bootorder; some firmware (seen on
+	  eMMC/mmcblk systems) does not place the new elilo entry first in the
+	  boot order automatically.
+	* README.md: note Linux 7.x support; bump version and install examples
+	  to 3.17.2.
+
 2026-05-30 rations <ehqcar@proton.me>
 	Developed with Claude Sonnet 4.6 (Anthropic) as AI development assistant.
 	* elilo 3.17 — modernisation for Linux 6.x / current UEFI firmware

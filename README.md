@@ -1,12 +1,12 @@
-# elilo 3.17 — EFI Linux Loader
+# elilo 3.17.2 — EFI Linux Loader
 
 elilo is an EFI/UEFI bootloader for Linux. It loads the kernel and initrd
 directly from the EFI System Partition (ESP) and passes control to the kernel
 via the EFI Handover Protocol.
 
-This is version 3.17, updated in 2026 to boot Linux 6.x on modern UEFI
-firmware. See the [Changes from 3.14](#changes-from-314) section for a full
-account of what was fixed and why.
+This is version 3.17.2, updated in 2026 to boot both Linux 6.x and 7.x kernels
+on modern UEFI firmware. See the [Changes from 3.14](#changes-from-314) section
+for a full account of what was fixed and why.
 
 elilo is distributed under the GNU General Public License version 2 (or, at
 your option, any later version). See [License & Credits](#license--credits)
@@ -39,7 +39,7 @@ for the full list of copyright holders.
 
 - x86_64 UEFI firmware (version 2.0 or later)
 - Linux kernel 3.3 or later (boot protocol 2.12+, EFI Handover Protocol)
-- Tested with Linux 6.12 on Devuan Excalibur / Debian Trixie
+- Tested with Linux 6.12 on Devuan Excalibur / Debian Trixie & 7.0.12 on Devuan Freia / Debian Forky
 
 To build from source:
 
