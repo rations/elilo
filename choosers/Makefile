@@ -38,6 +38,10 @@ ifeq ($(CONFIG_chooser_textmenu),y)
 FILES +=textmenu.o
 endif
 
+ifeq ($(CONFIG_chooser_menu),y)
+FILES +=menu.o
+endif
+
 TARGET=choosers.o
 
 all: $(TARGET)

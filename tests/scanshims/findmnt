@@ -1,0 +1,10 @@
+#!/bin/sh
+# test shim: TARGET lookups from $SHIM_DISKS, the rest like the basic shim
+case "$*" in
+  "-rno TARGET -S "*) awk -v d="$4" '$1 == d && $5 != "-" { print $5 }' "$SHIM_DISKS" ;;
+  *"-o SOURCE /")  echo /dev/vda2 ;;
+  *"-o FSTYPE /")  echo ext4 ;;
+  *"-o FSROOT /")  echo / ;;
+  *"-o SOURCE "*)  echo "$SHIM_ESP_SOURCE" ;;
+  *) exit 1 ;;
+esac

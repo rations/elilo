@@ -44,6 +44,7 @@ CONFIG_ext2fs=n
 #
 CONFIG_chooser_simple=y
 CONFIG_chooser_textmenu=y
+CONFIG_chooser_menu=y
 
 #
 # Enable IP-address based config file (elilo.conf) when netbooted
@@ -94,6 +95,10 @@ endif
 
 ifeq ($(CONFIG_chooser_textmenu),y)
 CFLAGS += -DCONFIG_CHOOSER_TEXTMENU
+endif
+
+ifeq ($(CONFIG_chooser_menu),y)
+CFLAGS += -DCONFIG_CHOOSER_MENU
 endif
 
 prefix	        = /usr/bin/

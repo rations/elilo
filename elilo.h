@@ -29,7 +29,7 @@
 #ifndef __ELILO_H__
 #define __ELILO_H__
 
-#define ELILO_VERSION L"3.17"
+#define ELILO_VERSION L"3.18"
 
 #include <efi.h>
 
@@ -116,6 +116,12 @@ typedef struct {
 
 	CHAR16 config[FILENAME_MAXLEN];		/* name of config file */
 	CHAR16 chooser[FILENAME_MAXLEN];	/* image chooser to use */
+
+	/*
+	 * set by find_label() for the selected image
+	 */
+	UINTN chainload;			/* image is an EFI binary to chainload */
+	CHAR16 chain_device[FILENAME_MAXLEN];	/* PARTUUID holding it, empty = boot device */
 } elilo_config_t;
 
 
@@ -172,6 +178,7 @@ extern INTN read_file(UINTN fd, UINTN, CHAR8 *);
 extern EFI_STATUS check_abort(VOID);
 extern VOID reset_input(VOID);
 extern INTN wait_timeout(UINTN);
+extern VOID wait_keypress(VOID);
 extern INTN argify(CHAR16 *, UINTN, CHAR16 **);
 extern VOID unargify(CHAR16 **, CHAR16 **);
 extern void split_args(CHAR16 *, CHAR16 *, CHAR16 *);
@@ -192,6 +199,10 @@ extern CHAR16 *get_message_filename(INTN which);
 extern CHAR16 *find_description(CHAR16 *label);
 extern VOID *get_next_description(VOID *prev, CHAR16 **label, CHAR16 **description);
 extern CHAR16 *get_config_file(VOID);
+extern CHAR16 *get_default_label(VOID);
+
+/* from chainload.c */
+extern INTN chainload_image(EFI_HANDLE dev, EFI_HANDLE parent, CHAR16 *path, CHAR16 *device, CHAR16 *opts);
 
 /* from initrd.c */
 extern INTN load_file(CHAR16 *, memdesc_t *);

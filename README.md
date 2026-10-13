@@ -1,12 +1,27 @@
-# elilo 3.17.2 — EFI Linux Loader
+# elilo 3.18 — EFI Linux Loader
+
+![elilo 3.18 boot menu: Devuan, CachyOS, GRUB and Haiku entries with a countdown](docs/boot-menu.png)
 
 elilo is an EFI/UEFI bootloader for Linux. It loads the kernel and initrd
 directly from the EFI System Partition (ESP) and passes control to the kernel
 via the EFI Handover Protocol.
 
-This is version 3.17.2, updated in 2026 to boot both Linux 6.x and 7.x kernels
-on modern UEFI firmware. See the [Changes from 3.14](#changes-from-314) section
-for a full account of what was fixed and why.
+This is version 3.18. It boots Linux 6.x and 7.x kernels on modern UEFI
+firmware and adds:
+
+- an **arrow-key boot menu** listing every entry while the timeout counts down
+- **automatic kernel updates** on the Debian family (Debian, Devuan, Ubuntu,
+  Mint, ...) and the Arch family (Arch, Artix, CachyOS, EndeavourOS, Manjaro, ...)
+- **one shared menu for several installed OSes** on the same ESP
+- **chainloading** of other EFI boot loaders — Windows, other distributions'
+  GRUB / systemd-boot / Limine / rEFInd, Haiku — found automatically with
+  `update-elilo --scan`
+
+Nothing depends on systemd: the scripts need only POSIX `sh`, util-linux and
+`efibootmgr`, so they work on sysvinit, OpenRC, runit and s6 systems alike.
+
+See [Changes in 3.18](#changes-in-318) and [Changes from 3.14](#changes-from-314)
+for a full account of what changed and why.
 
 elilo is distributed under the GNU General Public License version 2 (or, at
 your option, any later version). See [License & Credits](#license--credits)
@@ -19,7 +34,11 @@ for the full list of copyright holders.
 1. [Requirements](#requirements)
 2. [Building from Source](#building-from-source)
 3. [Installation](#installation)
-   - [Quick Install (Devuan/Debian)](#quick-install-devuandebian)
+   - [Quick Install](#quick-install)
+   - [The Boot Menu](#the-boot-menu)
+     - [Editing kernel options](#editing-kernel-options)
+     - [The command line](#the-command-line)
+   - [Multi-boot: other OSes in the menu](#multi-boot-other-oses-in-the-menu)
    - [Coexisting with GRUB](#coexisting-with-grub)
    - [Finding Your EFI System Partition](#finding-your-efi-system-partition)
    - [Installing the Bootloader Files](#installing-the-bootloader-files)
@@ -29,9 +48,10 @@ for the full list of copyright holders.
 4. [Automatic Kernel Updates](#automatic-kernel-updates)
 5. [Manual Kernel Updates](#manual-kernel-updates)
 6. [Partition Naming Reference](#partition-naming-reference)
-7. [Changes from 3.14](#changes-from-314)
-8. [Comparison with Slackware 15.0](#comparison-with-slackware-150)
-9. [License & Credits](#license--credits)
+7. [Changes in 3.18](#changes-in-318)
+8. [Changes from 3.14](#changes-from-314)
+9. [Comparison with Slackware 15.0](#comparison-with-slackware-150)
+10. [License & Credits](#license--credits)
 
 ---
 
@@ -39,7 +59,12 @@ for the full list of copyright holders.
 
 - x86_64 UEFI firmware (version 2.0 or later)
 - Linux kernel 3.3 or later (boot protocol 2.12+, EFI Handover Protocol)
-- Tested with Linux 6.12 on Devuan Excalibur / Debian Trixie & 7.0.12 on Devuan Freia / Debian Forky
+- Secure Boot disabled (elilo is not signed)
+- Tested with Linux 6.12 on Devuan Excalibur / Debian Trixie, 7.0.12 on
+  Devuan Freia / Debian Forky, and CachyOS (Arch family)
+
+To install with `install-elilo.sh`: `efibootmgr` and util-linux (`findmnt`,
+`lsblk`, `blkid`, `mountpoint`), present on virtually every distribution.
 
 To build from source:
 
@@ -60,34 +85,71 @@ make ARCH=x86_64
 
 This produces `elilo.efi` in the top-level directory.
 
+To build the release tarball used in [Quick Install](#quick-install):
+
+```bash
+./release-tarball.sh 3.18      # writes elilo-3.18.tar.gz
+```
+
+The update-elilo tests need no root and no real disks:
+
+```bash
+sh tests/run.sh
+```
+
 ---
 
 ## Installation
 
-### Quick Install (Devuan/Debian)
+### Quick Install
 
 The easiest way to install elilo is with the included installer script. It
-auto-detects your ESP, root device, and disk layout, then handles everything
-in one command:
+detects your distribution, ESP, root file system and kernel options, then
+handles everything in one command:
 
 ```bash
-tar -xf elilo-3.17.2-devuan.tar.gz
-cd elilo-3.17.2-devuan
+tar -xf elilo-3.18.tar.gz
+cd elilo-3.18
 sudo ./install-elilo.sh
 ```
 
+Options:
+
+| Option | Effect |
+|---|---|
+| `--esp DIR` | Use the ESP mounted at `DIR` instead of auto-detecting `/boot/efi`, `/efi` or `/boot` |
+| `--yes` | Accept the detected values without asking |
+
 The script will:
 
-- Create `/boot/efi/EFI/elilo/` and copy `elilo.efi`
-- Install `update-elilo` to `/usr/local/sbin/` and the kernel hooks to
-  `/etc/kernel/{postinst,postrm}.d/` so every future `apt upgrade` updates
-  elilo automatically
-- Write `/etc/elilo/update.conf` with your detected `ROOT_DEV` and `ELILO_DIR`
-- Copy the current kernel and initrd to the ESP and generate `elilo.conf`
-- Register an `elilo` UEFI boot entry via `efibootmgr`
+- Show what it detected (OS, ESP, root, kernel options) and let you change
+  the kernel options before anything is written
+- Create `<ESP>/EFI/elilo/` and copy `elilo.efi`
+- Install `update-elilo` to `/usr/local/sbin/` and the kernel hook for your
+  distribution, so every future kernel upgrade updates elilo automatically:
+  - Debian family: `/etc/kernel/{postinst,postrm}.d/zz-update-elilo`
+    (also used on any distribution that runs `/etc/kernel/postinst.d`)
+  - Arch family: `/etc/pacman.d/hooks/zz-update-elilo.hook`
+- Write `/etc/elilo/update.conf` with the detected values (`OS_ID`, `LAYOUT`,
+  `ROOT_DEV=UUID=...`, `APPEND`, ...)
+- Copy the kernels and initrds to the ESP and generate `elilo.conf`
+- Register an `elilo` UEFI boot entry via `efibootmgr` (only for the first OS
+  on that ESP)
+- Offer to search your disks for other OSes and boot loaders and add them to
+  the menu (see [Multi-boot](#multi-boot-other-oses-in-the-menu))
 
-Review `/etc/elilo/update.conf` after the install if you want to adjust any
-settings, then reboot to test.
+The kernel options default to those of the running kernel (minus `root=`,
+`initrd=` and `BOOT_IMAGE=`), so distribution specifics such as
+`rw rootflags=subvol=/@` on a btrfs root carry over. Review
+`/etc/elilo/update.conf` after the install if you want to adjust anything,
+then run `sudo update-elilo` and reboot to test.
+
+> **Upgrading from 3.17.x:** your existing `/etc/elilo/update.conf` keeps
+> working unchanged (single-OS layout). To switch to the new layout — needed
+> for the shared multi-OS menu — re-run the installer and answer **y** to
+> *Replace it with the detected settings?*. The old file is saved as
+> `/etc/elilo/update.conf.old`; the kernels move to `EFI/elilo/<OS_ID>/` on
+> the next update.
 
 > **Check the boot order before rebooting.** Creating a boot entry does not
 > guarantee the firmware tries it first, and if an `elilo` entry already exists
@@ -95,8 +157,245 @@ settings, then reboot to test.
 > is not first in `BootOrder`, set it first with `sudo efibootmgr --bootorder
 > XXXX` — see [Checking and setting the boot order](#checking-and-setting-the-boot-order).
 
-> If you prefer to install step by step — or are on a non-Debian distro — see
-> the manual installation sections below.
+> If you prefer to install step by step — or your distribution is neither
+> Debian- nor Arch-based — see the manual installation sections below.
+
+---
+
+### The Boot Menu
+
+Configs written by `update-elilo` use the `menu` chooser (`chooser=menu` in
+`elilo.conf`). Every boot entry is listed straight away, with the default
+highlighted and a countdown underneath:
+
+```
+ELILO 3.18 boot menu
+
+   1. Devuan GNU/Linux (7.0.12+deb14-amd64)
+   2. Devuan GNU/Linux (6.12.111+deb13-amd64, previous)
+   3. CachyOS Linux (linux-cachyos 6.17.2-2-cachyos)
+   4. Windows Boot Manager
+   5. Haiku
+
+↑/↓ select   Enter boot   e edit options   c command line
+
+Booting "Devuan GNU/Linux (7.0.12+deb14-amd64)" in 5 s. Press any key to stop.
+```
+
+| Key | Action |
+|---|---|
+| any key | stop the countdown |
+| ↑ / ↓, PgUp / PgDn, Home / End | move the selection |
+| `1`–`9` | jump to that entry |
+| Enter | boot the selected entry |
+| `e` | [edit the kernel options](#editing-kernel-options) of the selected entry for this boot |
+| `c` or Tab | switch to the classic `ELILO boot:` [command line](#the-command-line) |
+
+With `PROMPT=0` in `update.conf`, elilo boots the default without showing the
+menu; pressing a key before `TIMEOUT` runs out still opens it.
+
+Hand-written `elilo.conf` files that do not set `chooser=` keep the classic
+prompt; add `chooser=menu` to use the menu.
+
+#### Editing kernel options
+
+Press `e` on an entry to see the full command line elilo is about to pass to
+the kernel, for example:
+
+```
+Options for "Devuan GNU/Linux (6.12.111+deb13-amd64)"
+Enter boots with these options, Esc cancels, Ctrl-U clears the line.
+
+root=UUID=0a1b2c3d-4e5f-6789-abcd-ef0123456789 ro quiet
+```
+
+| Key | Action |
+|---|---|
+| typing | adds characters at the end of the line |
+| Backspace | deletes the last character |
+| Ctrl-U | clears the whole line |
+| Enter | boots the entry with the edited line |
+| Esc | returns to the menu without changing anything |
+
+The line replaces the entry's options for **this boot only**: nothing is
+written to disk, and the next boot uses `elilo.conf` again. The kernel and
+initrd stay those of the entry. Only plain ASCII characters can be typed, and
+there is no cursor movement: to change something in the middle, delete back to
+it with Backspace, or clear the line with Ctrl-U and type it again.
+
+Keep the `root=` part, or the kernel will not find its root file system.
+Common one-off changes:
+
+| Change | Why |
+|---|---|
+| remove `quiet` | see the kernel and init messages while booting |
+| add `nomodeset` | get a picture when the graphics driver fails |
+| add `single` | boot to single-user (rescue) mode |
+| add `init=/bin/sh` | get a root shell without running init, to repair a broken system |
+
+For a chainloaded entry (another boot loader) the line holds the load options
+passed to that loader, and is usually empty.
+
+To change the options permanently, edit `APPEND` in `/etc/elilo/update.conf`
+and run `sudo update-elilo`.
+
+#### The command line
+
+Press `c` (or Tab) in the menu for the classic `ELILO boot:` prompt, the
+interface of elilo 3.17 and earlier. It waits without a countdown until you
+press Enter.
+
+**Booting:**
+
+| Type | Result |
+|---|---|
+| Enter on an empty line | boots the default entry |
+| a label, e.g. `devuan` | boots that entry (the label, not the description; Tab lists them) |
+| a label and options, e.g. `devuan nomodeset` | boots that entry with the options **added** to its own |
+| a kernel path and options, e.g. `/EFI/elilo/devuan/vmlinuz-6.12.111+deb13-amd64 root=UUID=... ro` | boots any kernel on the ESP, without an initrd; a device from the `=` list can come first, as `dev_name:/path` |
+
+**Information** (only as the first character on the line):
+
+| Key | Shows |
+|---|---|
+| Tab | the list of labels; after a label, e.g. `devuan` then Tab, that entry's description, command line and initrd |
+| `=` | the devices elilo can read, with the names to use in `dev_name:` |
+| `%` | elilo's variables |
+| `&` | the boot device, default path and config file in use |
+| `?` | a short help |
+
+**Editing:** Backspace deletes a character, Ctrl-U clears the line, Ctrl-C
+starts a new line, and Ctrl-D leaves elilo so the firmware moves on to its next
+boot option.
+
+There is no way back to the menu from the prompt; reboot to see it again.
+
+---
+
+### Multi-boot: other OSes in the menu
+
+#### Several Linux installs sharing one elilo
+
+Each installed Linux can manage its own entries in **one** elilo menu on one
+ESP. Each OS copies its kernels to `EFI/elilo/<OS_ID>/` and writes its
+entries to `EFI/elilo/entries/<NN>-<OS_ID>.conf`; `update-elilo` merges every
+file in `entries/` into `elilo.conf`. A kernel upgrade on one OS never
+touches the others' entries.
+
+1. Install elilo on the first OS as usual (it registers the UEFI boot entry
+   and owns the global settings: timeout, default entry).
+2. On every other Linux install, mount **the same ESP** — typically through
+   `/etc/fstab`, at a free mount point such as `/efi` if `/boot/efi` is
+   already used by that OS's own ESP:
+
+   ```
+   # find the ESP elilo lives on: lsblk -o NAME,FSTYPE,PARTTYPE,PARTUUID
+   UUID=XXXX-XXXX  /efi  vfat  umask=0077,nofail  0  2
+   ```
+
+   `nofail` keeps that OS bootable if the disk is ever missing.
+3. Run the installer there, pointing at that mount:
+
+   ```bash
+   sudo mount /efi
+   sudo ./install-elilo.sh --esp /efi
+   ```
+
+   It sees the existing menu, adds this OS after the others, leaves the UEFI
+   boot entries and global settings alone, and installs this distribution's
+   kernel hook.
+
+The global settings (`TIMEOUT`, `PROMPT`, `DEFAULT`) are taken from the OS
+whose `update.conf` has `GLOBAL_OWNER=1`. `DEFAULT` takes any label, e.g.
+`DEFAULT=cachyos`.
+
+#### Other boot loaders and OSes: `update-elilo --scan`
+
+```bash
+sudo update-elilo --scan          # asks before adding each one
+sudo update-elilo --scan --yes    # adds everything found
+```
+
+`--scan` looks at every partition and offers a menu entry for:
+
+- boot loaders on any EFI System Partition — Windows Boot Manager, other
+  distributions' GRUB (or shim), systemd-boot, Limine, rEFInd, or the
+  removable-media loader `EFI/BOOT/BOOTX64.EFI` when nothing else is there.
+  ESPs that are not mounted are mounted read-only for the scan and unmounted
+  afterwards.
+- **Haiku** loaders already on an ESP: `EFI/HAIKU/BOOTX64.EFI` (the layout
+  from Haiku's guide), any `EFI/haiku*/haiku_loader*.efi`, or a removable-media
+  loader that is Haiku's. See [Haiku](#haiku) below for a Haiku install that has
+  no ESP of its own.
+
+Entries found by `--scan` are chainloaded: elilo starts that boot loader,
+which boots its OS. They are located by PARTUUID, so they keep working when
+disks are renumbered. Running `--scan` again replaces everything the previous
+scan added.
+
+#### Haiku
+
+Haiku's EFI loader finds the Haiku partition by itself, so it does not need
+to be on the same disk: it can sit on elilo's ESP. A Haiku install without an
+ESP of its own works like this. Two things to know:
+
+- **Getting the loader.** Haiku keeps `haiku_loader.efi` inside its system
+  package, which cannot be read from Linux, so `--scan` cannot copy it from
+  the Haiku partition. Take it from the Haiku ISO of the same release, where
+  it is `EFI/BOOT/BOOTX64.EFI` in the ISO's EFI boot image:
+
+  ```bash
+  xorriso -osirrox on -indev haiku-*.iso -extract_boot_images bootimg/
+  mcopy -i bootimg/eltorito_img2_uefi.img ::/EFI/BOOT/BOOTX64.EFI haiku_loader.efi
+  sudo update-elilo --add-efi haiku "Haiku" haiku_loader.efi
+  ```
+
+  From a running Haiku the same file is
+  `/boot/system/data/platform_loaders/haiku_loader.efi`. Add it again after
+  upgrading Haiku so the loader matches the installed release.
+- **Partition type.** On a GPT disk Haiku's loader only picks a partition by
+  itself when its type is *Haiku BFS*
+  (`42465331-3ba3-10f1-802a-4861696b7521`). If the Haiku partition has another
+  type, for example *EFI System*, the loader stops at its menu with no boot
+  volume selected. `--scan` warns about this and prints the fix, which changes
+  only the partition type, not the data:
+
+  ```bash
+  sudo sfdisk --part-type /dev/sdX N 42465331-3ba3-10f1-802a-4861696b7521
+  ```
+
+#### Adding or removing entries by hand
+
+```bash
+# copy an EFI binary onto elilo's ESP and add it to the menu
+sudo update-elilo --add-efi haiku "Haiku" /path/to/haiku_loader.efi
+
+# chainload a loader that stays on another partition (PARTUUID from lsblk)
+sudo update-elilo --add-efi windows "Windows" /EFI/Microsoft/Boot/bootmgfw.efi \
+    --device 0a1b2c3d-1111-2222-3333-444455556666
+
+# remove an entry added by --scan or --add-efi
+sudo update-elilo --remove-entry windows
+```
+
+#### Chainload entries in elilo.conf
+
+```
+image=/EFI/Microsoft/Boot/bootmgfw.efi
+  label=windows
+  description="Windows Boot Manager"
+  device=0a1b2c3d-1111-2222-3333-444455556666
+  chainload
+```
+
+| Option | Meaning |
+|---|---|
+| `chainload` | `image=` is an EFI binary started with the firmware's LoadImage/StartImage instead of a Linux kernel |
+| `device=` | PARTUUID of the partition holding it (GPT `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` or MBR `xxxxxxxx-NN`). Without it, the path is on elilo's own ESP |
+| `append=` | passed to the binary as its load options |
+
+If the binary cannot be loaded, or it exits, elilo shows the error and returns
+to the menu.
 
 ---
 
@@ -436,18 +735,29 @@ Re-run `efibootmgr -v` to confirm the new order, then reboot.
 
 The most common complaint about elilo is being locked out after a kernel
 upgrade. The `update-elilo` script and kernel hooks in the `scripts/` and
-`hooks/` directories solve this: install them once and `apt upgrade` will
-automatically copy the new kernel to the ESP and regenerate `elilo.conf`,
-exactly as GRUB runs `update-grub`.
+`hooks/` directories solve this: install them once and every kernel upgrade
+(`apt upgrade`, `pacman -Syu`, ...) automatically copies the new kernel to
+the ESP and regenerates `elilo.conf`, exactly as GRUB runs `update-grub`.
 
 ### How it works
 
-Debian/Devuan/Ubuntu run every script in `/etc/kernel/postinst.d/` after each
-kernel package install, passing the new version as `$1`. The `zz-update-elilo`
-hook calls `update-elilo`, which copies the kernel and initrd to the ESP and
-rewrites `elilo.conf` with the new kernel as default and the previous kernel
-as a fallback entry. When a kernel is removed, the postrm hook deletes its
-files from the ESP and regenerates the config.
+- **Debian family** (`LAYOUT=debian`; kernels named
+  `/boot/vmlinuz-<version>`): every script in `/etc/kernel/postinst.d/` runs
+  after each kernel install, with the new version as `$1`. The
+  `zz-update-elilo` hook calls `update-elilo`, which copies the newest kernel
+  and initrd to the ESP as the default entry, and the next newest as the
+  `<OS_ID>-old` fallback. When a kernel is removed, the postrm hook
+  regenerates the config and the removed kernel leaves the ESP.
+- **Arch family** (`LAYOUT=arch`; kernels named `/boot/vmlinuz-<pkgbase>`,
+  e.g. `linux`, `linux-lts`, `linux-cachyos`): the pacman hook
+  `zz-update-elilo.hook` runs after mkinitcpio's own hook whenever a kernel,
+  module, firmware, DKMS module or microcode package changes. Every installed
+  kernel gets an entry (`<OS_ID>` for `DEFAULT_KERNEL` or `linux`,
+  `<OS_ID>-lts`, `<OS_ID>-zen`, ...). CPU microcode (`/boot/*-ucode.img`) is
+  prepended to each initramfs, since elilo loads a single initrd.
+
+Files that have not changed are not rewritten. If the ESP does not have room
+for the new files, `update-elilo` stops before touching `elilo.conf`.
 
 ### One-time setup
 
@@ -466,15 +776,20 @@ sudo cp scripts/elilo-update.conf /etc/elilo/update.conf
 sudo nano /etc/elilo/update.conf
 ```
 
-Set these values to match your system:
+Set these values to match your system (the file explains each one):
 
 ```sh
-ELILO_DIR=/boot/efi/EFI/elilo   # where elilo.efi lives on the ESP
-ROOT_DEV=/dev/sda2               # your root partition (uname -r gives kernel; findmnt -n -o SOURCE / gives root)
-APPEND="ro quiet"                # kernel parameters
+OS_ID=debian                        # short name: kernels go in ELILO_DIR/<OS_ID>/
+OS_NAME="Debian GNU/Linux"          # shown in the menu
+LAYOUT=debian                       # debian or arch (see the comments in the file)
+ELILO_DIR=/boot/efi/EFI/elilo       # where elilo.efi lives on the ESP
+ROOT_DEV=UUID=...                   # findmnt -n -o UUID /  gives yours
+APPEND="ro quiet"                   # kernel parameters
 ```
 
-**Step 3 — Install the kernel hooks:**
+**Step 3 — Install the kernel hook for your distribution:**
+
+Debian family (or any distribution that runs `/etc/kernel/postinst.d`):
 
 ```bash
 sudo cp hooks/postinst.d/zz-update-elilo /etc/kernel/postinst.d/zz-update-elilo
@@ -483,26 +798,34 @@ sudo chmod 755 /etc/kernel/postinst.d/zz-update-elilo
 sudo chmod 755 /etc/kernel/postrm.d/zz-update-elilo
 ```
 
+Arch family:
+
+```bash
+sudo mkdir -p /etc/pacman.d/hooks
+sudo cp hooks/pacman/zz-update-elilo.hook /etc/pacman.d/hooks/
+```
+
 **Step 4 — Run update-elilo once to generate the initial config:**
 
 ```bash
 sudo update-elilo
 ```
 
-This copies the current kernel to the ESP and writes `elilo.conf`. From this
-point on, `apt upgrade` handles everything automatically.
+This copies the current kernels to the ESP and writes `elilo.conf`. From this
+point on, kernel upgrades are handled automatically.
 
-> **Note:** `update-elilo` regenerates `elilo.conf` completely. If you have
-> custom entries in your existing `elilo.conf` (e.g. dual-boot, extra
-> parameters), back it up first and migrate any custom settings to
-> `/etc/elilo/update.conf` before running it.
+> **Note:** `update-elilo` regenerates `elilo.conf` completely. Put custom
+> entries in their own file in `EFI/elilo/entries/` (or add them with
+> `update-elilo --add-efi`) so they survive; anything edited directly in
+> `elilo.conf` is overwritten.
 
 ### Other distributions
 
-The `update-elilo` script itself is distro-agnostic. The hooks above are for
-Debian/Devuan/Ubuntu only. On Fedora/RHEL/openSUSE, install the hook to
-`/etc/kernel/install.d/` instead. On Arch, create a pacman hook. On any
-distro you can run `sudo update-elilo` manually after each kernel upgrade.
+Distributions that name kernels `/boot/vmlinuz-<version>` (with an initrd
+called `initrd.img-<version>`, `initrd-<version>.img` or
+`initramfs-<version>.img`) can use `LAYOUT=debian`. If the distribution runs
+`/etc/kernel/postinst.d` hooks (Gentoo's installkernel does), the Debian hooks
+work as they are. Otherwise run `sudo update-elilo` after each kernel upgrade.
 
 ---
 
@@ -574,6 +897,58 @@ boots correctly, then remove it on the next upgrade.
 
 The partition numbers above assume a standard layout (ESP first, root second).
 Your layout may differ — always verify with `lsblk` or `fdisk -l`.
+
+---
+
+## Changes in 3.18
+
+### Boot menu (`choosers/menu.c`)
+
+A new `menu` chooser replaces the "dots, then a bare `ELILO boot:` prompt"
+experience: all entries are listed during the countdown and selected with the
+arrow keys (see [The Boot Menu](#the-boot-menu)). It needs no message files;
+the layout follows the console size and scrolls when there are many entries.
+`e` edits an entry's options and `c` falls back to the classic prompt. The
+command-line building shared by the choosers moved to
+`chooser_build_cmdline()` (`chooser.c`), fixing an operator-precedence error
+in the length check that the old copies carry. The classic prompt no longer
+prints countdown dots forever when the timeout is infinite.
+
+### Chainloading (`chainload.c`, `config.c`, `elilo.c`)
+
+New image options `chainload` and `device=<PARTUUID>`. A chainload entry is
+started with the firmware's `LoadImage`/`StartImage` (through
+`uefi_call_wrapper`, like every other EFI call). The partition is found by
+matching the GPT GUID, or the MBR signature and partition number, in the
+hard-drive node of each file system's device path; if it is not there, all
+controllers are connected (firmware "fast boot" may connect only the boot
+disk) and the search is repeated. If the image fails to load or returns,
+elilo prints the error and goes back to the menu.
+
+### update-elilo, hooks and installer
+
+- **Fragment layout** for one shared menu across several OSes (`OS_ID`,
+  `entries/*.conf`, per-OS kernel directories); configs without `OS_ID` keep
+  the 3.17 layout and output.
+- **Arch family** support (`LAYOUT=arch`): pkgbase-named kernels, microcode
+  prepended to the initramfs, optional fallback initramfs entries, and a
+  pacman hook.
+- `--scan` finds Windows, other boot loaders and Haiku loaders on any ESP,
+  and warns when a Haiku partition has a type Haiku's loader will not boot
+  from; `--add-efi` and `--remove-entry` manage chainload entries by hand.
+- `tests/`: update-elilo test suites (`sh tests/run.sh`), no root needed.
+- btrfs: the `[/subvol]` suffix printed by `findmnt` is stripped from the root
+  device, and `rootflags=subvol=...` is added when missing.
+- ESP space is checked before copying; unchanged files are not rewritten.
+- Generated strings are kept to printable ASCII so elilo's byte-oriented
+  config parser always reads them correctly.
+- Kernel hooks act whenever they are run outside dpkg (Gentoo's installkernel,
+  manual runs) and only skip non-`configure` dpkg invocations.
+- `install-elilo.sh`: distribution detection, `--esp` / `--yes`, `root=UUID=`,
+  kernel options taken from the running system, joining an existing shared
+  menu, and an offer to run `--scan`.
+- No systemd dependency anywhere; partition data falls back to `blkid -p` when
+  no udev database is available.
 
 ---
 
@@ -872,7 +1247,7 @@ preserved in any redistribution:
 | 2005 | Hewlett-Packard Development Company, L.P. | Later HP entity name |
 | 2006 | Christoph Pfisterer | `console.c`, `console.h` |
 | 2006–2009 | Intel Corporation | `elilo.c`, `x86_64/sysdeps.h`, and others — contributed by Fenghua Yu, Bibo Mao, Chandramouli Narayanan, Mike Johnston, Chris Ahna |
-| 2026 | rations `<ehqcar@proton.me>` | Modernisation for Linux 6.x / modern UEFI (fixes 1–12) |
+| 2026 | rations `<ehqcar@proton.me>` | Modernisation for Linux 6.x / modern UEFI (fixes 1–12); 3.18 menu, chainloading, multi-OS and Arch support |
 
 ### Individual contributors credited in source headers
 
@@ -892,4 +1267,4 @@ preserved in any redistribution:
 
 Version 3.17 modernisation developed with
 [Claude Sonnet 4.6](https://www.anthropic.com) (Anthropic) as AI development
-assistant.
+assistant; version 3.18 with Claude Opus 5.5.

@@ -6,3 +6,12 @@ tools/eliloalt
 
 # Downloaded packages kept for reference — install via: apt-get install gnu-efi
 *.deb
+
+# Release tarballs (built with release-tarball.sh)
+*.tar.gz
+
+# Test output (tests/run.sh)
+tests/work/
+
+# Local working notes (not part of the project)
+CLAUDE.md

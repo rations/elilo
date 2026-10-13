@@ -1,0 +1,10 @@
+#!/bin/sh
+# test shim: partitions and fields from $SHIM_DISKS
+# (lines: dev parttype partuuid fstype mountdir [disk partnum])
+case "$1" in
+  -prno) awk '{ print $1, "part" }' "$SHIM_DISKS" ;;
+  -dno)
+    # without a udev database lsblk leaves these columns blank
+    case $2 in PARTTYPE|PARTUUID|FSTYPE) [ "${SHIM_NO_UDEV:-0}" = 1 ] && { echo; exit 0; } ;; esac
+    awk -v d="$3" -v f="$2" '$1 == d { if (f == "PARTTYPE") print $2; if (f == "PARTUUID") print $3; if (f == "FSTYPE") print $4; if (f == "PKNAME" && $6 != "") print $6 }' "$SHIM_DISKS" ;;
+esac
