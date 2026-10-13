@@ -134,8 +134,10 @@ reprint:
 	Print(L"\nELILO boot: %s", buffer);
 	/*
 	 * autoboot with default choice after timeout expires
+	 * (no countdown dots when there is nothing to count down to)
 	 */
-	if (first_time && (ret=wait_timeout(elilo_opt.timeout)) != 1) {
+	if (first_time && elilo_opt.timeout != ELILO_TIMEOUT_INFINITY
+	    && (ret=wait_timeout(elilo_opt.timeout)) != 1) {
 		return ret == -1 ? -1: 0;
 	}
 	first_time = 0;

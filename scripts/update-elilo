@@ -1,19 +1,41 @@
 #!/bin/sh
-# update-elilo — copy the latest kernel/initrd to the ESP and regenerate elilo.conf
+# update-elilo — copy kernels/initrds to the ESP and regenerate elilo.conf
 #
-# Called automatically by /etc/kernel/postinst.d/zz-update-elilo after each
-# kernel install, and by /etc/kernel/postrm.d/zz-update-elilo after removal.
-# May also be run manually: sudo update-elilo [version]
+# Called automatically after kernel installs/removals:
+#   Debian family: /etc/kernel/postinst.d/zz-update-elilo, /etc/kernel/postrm.d/zz-update-elilo
+#   Arch family:   /etc/pacman.d/hooks/zz-update-elilo.hook
+# May also be run manually.
 #
 # Config: /etc/elilo/update.conf
 #
 # Usage:
-#   update-elilo <kernel-version>   — install/update a specific kernel
-#   update-elilo                    — refresh config using newest kernel in /boot
+#   update-elilo [kernel-version]   refresh kernels on the ESP and elilo.conf
+#   update-elilo --scan [--yes]     find other OSes / boot loaders and add menu entries
+#   update-elilo --add-efi LABEL "DESCRIPTION" FILE [--device PARTUUID]
+#                                   add a menu entry that chainloads an EFI binary
+#   update-elilo --remove-entry LABEL
+#                                   remove an entry added by --scan or --add-efi
+#
+# Two modes, chosen by update.conf:
+#
+#   legacy   (no OS_ID set; configs written by elilo 3.17.x)
+#            kernels sit directly in ELILO_DIR, elilo.conf is written whole,
+#            labels "linux" and "linux-old".
+#
+#   fragment (OS_ID set; written by install-elilo.sh 3.18+)
+#            several OSes can share one ELILO_DIR. Each OS keeps its kernels in
+#            ELILO_DIR/<OS_ID>/ and its menu entries in
+#            ELILO_DIR/entries/<ENTRY_ORDER>-<OS_ID>.conf; elilo.conf is
+#            assembled from every file in ELILO_DIR/entries/.
+#
+# Only POSIX sh, util-linux and coreutils are used (no systemd).
 
 set -e
 
-CONFIG=/etc/elilo/update.conf
+CONFIG="${CONFIG:-/etc/elilo/update.conf}"
+BOOT_DIR="${BOOT_DIR:-/boot}"
+MODULES_DIR="${MODULES_DIR:-/usr/lib/modules}"
+ELILO_EFI_SRC="${ELILO_EFI_SRC:-}"
 
 # Load user config
 [ -f "$CONFIG" ] && . "$CONFIG"
@@ -26,6 +48,28 @@ APPEND="${APPEND:-ro quiet}"
 KEEP_PREVIOUS="${KEEP_PREVIOUS:-1}"
 TIMEOUT="${TIMEOUT:-50}"
 PROMPT="${PROMPT:-1}"
+
+# fragment mode only
+OS_ID="${OS_ID:-}"
+OS_NAME="${OS_NAME:-}"
+LAYOUT="${LAYOUT:-}"
+ENTRY_ORDER="${ENTRY_ORDER:-50}"
+GLOBAL_OWNER="${GLOBAL_OWNER:-0}"
+DEFAULT="${DEFAULT:-}"
+DEFAULT_KERNEL="${DEFAULT_KERNEL:-}"
+UCODE="${UCODE:-auto}"
+INCLUDE_FALLBACK="${INCLUDE_FALLBACK:-0}"
+CHOOSER="${CHOOSER:-menu}"
+
+ESP_ROOT="${ESP_ROOT:-$(printf '%s\n' "$ELILO_DIR" | sed 's|^\(.*\)/[Ee][Ff][Ii]/.*$|\1|')}"
+ENTRIES_DIR="$ELILO_DIR/entries"
+GLOBAL_FRAG="$ENTRIES_DIR/00-global.conf"
+
+ESP_PARTTYPE_GPT=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+
+info() { echo "update-elilo: $*"; }
+warn() { echo "update-elilo: WARNING: $*" >&2; }
+die()  { echo "update-elilo: ERROR: $*" >&2; exit 1; }
 
 # ── Version-aware kernel listing helper ─────────────────────────────────────
 # kernel_versions DIR
@@ -48,6 +92,100 @@ kernel_versions() {
     }
 }
 
+# ── Root device helpers ─────────────────────────────────────────────────────
+
+# findmnt prints btrfs subvolumes as /dev/sdXN[/@] — strip the [subvol] part
+detect_root_dev() {
+    findmnt -n -o SOURCE / 2>/dev/null | head -1 | sed 's/\[.*\]$//'
+}
+
+# echo APPEND, plus rootflags=subvol=… when / is a btrfs subvolume and
+# APPEND does not already say how to mount it
+effective_append() {
+    _app=$APPEND
+    case " $_app " in
+        *" rootflags="*) ;;
+        *)
+            if [ "$(findmnt -n -o FSTYPE / 2>/dev/null | head -1)" = "btrfs" ]; then
+                _sub=$(findmnt -n -o FSROOT / 2>/dev/null | head -1)
+                if [ -n "$_sub" ] && [ "$_sub" != "/" ]; then
+                    _app="${_app:+$_app }rootflags=subvol=$_sub"
+                fi
+            fi
+            ;;
+    esac
+    printf '%s\n' "$_app"
+}
+
+# ── Partition helpers (work without a udev database) ────────────────────────
+
+# part_field DEV PARTTYPE|PARTUUID|FSTYPE  → lower-case value, may be empty
+part_field() {
+    _v=$(lsblk -dno "$2" "$1" 2>/dev/null | head -1)
+    if [ -z "$_v" ]; then
+        case $2 in
+            PARTTYPE) _k=PART_ENTRY_TYPE ;;
+            PARTUUID) _k=PART_ENTRY_UUID ;;
+            FSTYPE)   _k=TYPE ;;
+        esac
+        _v=$(blkid -p -o value -s "$_k" "$1" 2>/dev/null | head -1)
+    fi
+    printf '%s\n' "$_v" | tr 'A-Z' 'a-z'
+}
+
+list_partitions() {
+    lsblk -prno NAME,TYPE 2>/dev/null | awk '$2 == "part" { print $1 }'
+}
+
+# ── Common checks ───────────────────────────────────────────────────────────
+
+check_esp() {
+    if [ "${ELILO_SKIP_MOUNTCHECK:-0}" != "1" ] && ! mountpoint -q "$ESP_ROOT" 2>/dev/null; then
+        echo "update-elilo: ESP not mounted at $ESP_ROOT, skipping" >&2
+        exit 0
+    fi
+    if [ ! -d "$ELILO_DIR" ]; then
+        echo "update-elilo: elilo directory $ELILO_DIR does not exist" >&2
+        echo "  Create it and install elilo.efi first, then run update-elilo again." >&2
+        exit 1
+    fi
+}
+
+need_fragment_mode() {
+    [ -n "$OS_ID" ] && return 0
+    die "$1 needs the multi-OS layout (OS_ID in $CONFIG).
+  Re-run install-elilo.sh and choose to replace the config, or add OS_ID=<name> to $CONFIG."
+}
+
+valid_label() {
+    case $1 in
+        ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    return 0
+}
+
+# path of FILE relative to the ESP root, e.g. /EFI/elilo/vmlinuz-X
+esp_path() {
+    printf '%s\n' "${1#"$ESP_ROOT"}"
+}
+
+# elilo reads its config byte by byte: keep generated strings printable
+# ASCII and free of the double quotes that delimit them
+conf_str() {
+    printf '%s' "$1" | tr -cd ' -~' | tr -d '"'
+}
+
+# file_size FILE → bytes (0 if missing)
+file_size() {
+    if [ -e "$1" ]; then wc -c < "$1" | tr -d ' '; else echo 0; fi
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Legacy mode (elilo 3.17.x configs) — behaviour unchanged
+# ═════════════════════════════════════════════════════════════════════════════
+
+legacy_update() {
+
 # ── Determine kernel version ────────────────────────────────────────────────
 
 if [ -n "$1" ]; then
@@ -55,59 +193,40 @@ if [ -n "$1" ]; then
     NEW_VERSION="$1"
 else
     # Highest installed kernel VERSION in /boot (not newest mtime).
-    NEW_VERSION=$(kernel_versions /boot | head -1)
+    NEW_VERSION=$(kernel_versions "$BOOT_DIR" | head -1)
 fi
 
 if [ -z "$NEW_VERSION" ]; then
-    echo "update-elilo: no kernel found in /boot" >&2
+    echo "update-elilo: no kernel found in $BOOT_DIR" >&2
     exit 0
 fi
 
 # ── Check ESP is mounted ─────────────────────────────────────────────────────
 
-ESP_ROOT=$(echo "$ELILO_DIR" | sed 's|/EFI/.*||')
-if ! mountpoint -q "$ESP_ROOT" 2>/dev/null; then
-    echo "update-elilo: ESP not mounted at $ESP_ROOT, skipping" >&2
-    exit 0
-fi
-
-if [ ! -d "$ELILO_DIR" ]; then
-    echo "update-elilo: elilo directory $ELILO_DIR does not exist" >&2
-    echo "  Create it and install elilo.efi first, then run update-elilo again." >&2
-    exit 1
-fi
+check_esp
 
 # ── Copy kernel and initrd to ESP ────────────────────────────────────────────
 
 # Fail loud if the requested/selected kernel image does not exist — do NOT
 # proceed to overwrite a working elilo.conf with a broken one.
-if [ ! -f "/boot/vmlinuz-$NEW_VERSION" ]; then
-    echo "update-elilo: ERROR: /boot/vmlinuz-$NEW_VERSION does not exist" >&2
+if [ ! -f "$BOOT_DIR/vmlinuz-$NEW_VERSION" ]; then
+    echo "update-elilo: ERROR: $BOOT_DIR/vmlinuz-$NEW_VERSION does not exist" >&2
     echo "  Refusing to regenerate $ELILO_CONF. No changes made." >&2
     exit 1
 fi
 
-install -m 644 "/boot/vmlinuz-$NEW_VERSION" "$ELILO_DIR/vmlinuz-$NEW_VERSION"
+install -m 644 "$BOOT_DIR/vmlinuz-$NEW_VERSION" "$ELILO_DIR/vmlinuz-$NEW_VERSION"
 echo "update-elilo: copied vmlinuz-$NEW_VERSION to $ELILO_DIR"
 
 # Locate the matching initrd. The standard Debian path is
 # /boot/initrd.img-$VERSION; probe a couple of common variants too.
-NEW_INITRD=""
-for cand in \
-    "/boot/initrd.img-$NEW_VERSION" \
-    "/boot/initrd-$NEW_VERSION.img" \
-    "/boot/initramfs-$NEW_VERSION.img"; do
-    if [ -f "$cand" ]; then
-        NEW_INITRD="$cand"
-        break
-    fi
-done
+NEW_INITRD=$(find_debian_initrd "$NEW_VERSION")
 
 if [ -n "$NEW_INITRD" ]; then
     install -m 644 "$NEW_INITRD" "$ELILO_DIR/initrd.img-$NEW_VERSION"
     echo "update-elilo: copied $(basename "$NEW_INITRD") to $ELILO_DIR/initrd.img-$NEW_VERSION"
 else
-    echo "update-elilo: WARNING: no initrd found for $NEW_VERSION in /boot" >&2
+    echo "update-elilo: WARNING: no initrd found for $NEW_VERSION in $BOOT_DIR" >&2
     echo "  A normal Devuan/Debian system will NOT boot without an initrd." >&2
     echo "  Run: update-initramfs -c -k $NEW_VERSION, then re-run update-elilo." >&2
 fi
@@ -125,12 +244,12 @@ fi
 # ── Determine EFI path prefix for elilo.conf ─────────────────────────────────
 # elilo.conf image= paths are relative to the ESP root, e.g. /EFI/elilo/vmlinuz-X
 
-EFI_PATH=$(echo "$ELILO_DIR" | sed "s|$ESP_ROOT||")
+EFI_PATH=$(esp_path "$ELILO_DIR")
 
 # ── Auto-detect root device if not configured ────────────────────────────────
 
 if [ -z "$ROOT_DEV" ]; then
-    ROOT_DEV=$(findmnt -n -o SOURCE / 2>/dev/null | head -1)
+    ROOT_DEV=$(detect_root_dev)
     if [ -z "$ROOT_DEV" ]; then
         echo "update-elilo: could not detect root device; set ROOT_DEV in $CONFIG" >&2
         exit 1
@@ -183,3 +302,736 @@ kernel_versions "$ELILO_DIR" \
         rm -f "$ELILO_DIR/vmlinuz-$OLD_VERSION"
         rm -f "$ELILO_DIR/initrd.img-$OLD_VERSION"
     done
+}
+
+# find_debian_initrd VERSION → path of the matching initrd in BOOT_DIR, or empty
+find_debian_initrd() {
+    for cand in \
+        "$BOOT_DIR/initrd.img-$1" \
+        "$BOOT_DIR/initrd-$1.img" \
+        "$BOOT_DIR/initramfs-$1.img"; do
+        if [ -f "$cand" ]; then
+            printf '%s\n' "$cand"
+            return 0
+        fi
+    done
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Fragment mode — shared ESP, one entries file per OS
+# ═════════════════════════════════════════════════════════════════════════════
+
+# A sync is planned first (PLAN), checked for ESP space, then executed, so a
+# full ESP never leaves elilo.conf pointing at half-copied files.
+#   PLAN lines:  <dest-name>|<source>[:<source>...]
+# Sources are concatenated (microcode + initramfs → one initrd).
+PLAN=""
+KEEP_FILES=""
+
+plan_copy() {
+    PLAN="${PLAN}$1|$2
+"
+    KEEP_FILES="${KEEP_FILES}$1
+"
+}
+
+check_space() {
+    _need=0
+    _have=0
+    _oldifs=$IFS
+    IFS='
+'
+    for _line in $PLAN; do
+        _dst=${_line%%|*}
+        _srcs=${_line#*|}
+        IFS=:
+        for _s in $_srcs; do
+            _need=$((_need + $(file_size "$_s")))
+        done
+        IFS='
+'
+        _have=$((_have + $(file_size "$KDIR/$_dst")))
+    done
+    IFS=$_oldifs
+
+    _avail_kb=$(df -Pk "$ESP_ROOT" 2>/dev/null | awk 'NR == 2 { print $4 }')
+    [ -n "$_avail_kb" ] || return 0
+    # replaced files are freed as they are overwritten; keep 1 MiB slack
+    if [ $(( _avail_kb * 1024 + _have )) -lt $(( _need + 1048576 )) ]; then
+        die "not enough space on the ESP ($ESP_ROOT): need $((_need / 1048576)) MiB, \
+have $(( (_avail_kb * 1024 + _have) / 1048576 )) MiB. elilo.conf left unchanged."
+    fi
+}
+
+run_plan() {
+    mkdir -p "$KDIR"
+    _oldifs=$IFS
+    IFS='
+'
+    for _line in $PLAN; do
+        IFS=$_oldifs
+        _dst=${_line%%|*}
+        _srcs=${_line#*|}
+        _tmp="$KDIR/.$_dst.tmp.$$"
+        : > "$_tmp"
+        IFS=:
+        for _s in $_srcs; do
+            cat "$_s" >> "$_tmp"
+        done
+        IFS=$_oldifs
+        if [ -f "$KDIR/$_dst" ] && cmp -s "$_tmp" "$KDIR/$_dst"; then
+            rm -f "$_tmp"
+        else
+            chmod 644 "$_tmp"
+            mv "$_tmp" "$KDIR/$_dst"
+            info "copied $(printf '%s' "$_srcs" | tr ':' '+') to $KDIR/$_dst"
+        fi
+        IFS='
+'
+    done
+    IFS=$_oldifs
+}
+
+# remove files in KDIR that are not part of the current plan
+prune_kdir() {
+    for _f in "$KDIR"/*; do
+        [ -f "$_f" ] || continue
+        _n=${_f##*/}
+        if ! printf '%s' "$KEEP_FILES" | grep -Fxq "$_n"; then
+            info "removing $KDIR/$_n"
+            rm -f "$_f"
+        fi
+    done
+}
+
+# emit_linux_entry LABEL DESCRIPTION KERNEL-NAME INITRD-NAME
+emit_linux_entry() {
+    echo ""
+    echo "image=$KPATH/$3"
+    echo "  label=$1"
+    echo "  description=\"$(conf_str "$2")\""
+    [ -n "$4" ] && echo "  initrd=$KPATH/$4"
+    echo "  root=$ROOT_DEV"
+    echo "  append=\"$EFF_APPEND\""
+}
+
+# ── Debian family: /boot/vmlinuz-<version>, /boot/initrd.img-<version> ─────
+
+sync_debian() {
+    if [ -n "$1" ] && [ ! -f "$BOOT_DIR/vmlinuz-$1" ]; then
+        echo "update-elilo: ERROR: $BOOT_DIR/vmlinuz-$1 does not exist" >&2
+        echo "  Refusing to regenerate $ELILO_CONF. No changes made." >&2
+        exit 1
+    fi
+
+    # newest version is the default, the next one the fallback
+    _versions=$(kernel_versions "$BOOT_DIR" | head -n "$([ "$KEEP_PREVIOUS" = "1" ] && echo 2 || echo 1)")
+    if [ -z "$_versions" ]; then
+        warn "no kernel found in $BOOT_DIR"
+        return 1
+    fi
+
+    _n=0
+    for _v in $_versions; do
+        _n=$((_n + 1))
+        _initrd=$(find_debian_initrd "$_v")
+        plan_copy "vmlinuz-$_v" "$BOOT_DIR/vmlinuz-$_v"
+        if [ -n "$_initrd" ]; then
+            plan_copy "initrd.img-$_v" "$_initrd"
+            _iname="initrd.img-$_v"
+        else
+            warn "no initrd found for $_v in $BOOT_DIR — it will most likely not boot.
+  Run: update-initramfs -c -k $_v, then re-run update-elilo."
+            _iname=""
+        fi
+        if [ $_n -eq 1 ]; then
+            ENTRIES="$ENTRIES$(emit_linux_entry "$OS_ID" "$OS_NAME ($_v)" "vmlinuz-$_v" "$_iname")
+"
+        else
+            ENTRIES="$ENTRIES$(emit_linux_entry "$OS_ID-old" "$OS_NAME ($_v, previous)" "vmlinuz-$_v" "$_iname")
+"
+        fi
+    done
+}
+
+# ── Arch family: /usr/lib/modules/<version>/pkgbase → /boot/vmlinuz-<pkgbase>
+
+# has_kernel PKGBASE — is it in $_kernels ("pkgbase version" lines)?
+has_kernel() {
+    printf '%s\n' "$_kernels" | awk -v p="$1" '$1 == p { found = 1 } END { exit !found }'
+}
+
+sync_arch() {
+    _kernels=""
+    for _d in "$MODULES_DIR"/*/; do
+        [ -f "$_d/pkgbase" ] || continue
+        _pkg=$(head -1 "$_d/pkgbase")
+        _ver=$(basename "$_d")
+        if [ ! -f "$BOOT_DIR/vmlinuz-$_pkg" ]; then
+            warn "$BOOT_DIR/vmlinuz-$_pkg missing for $_pkg $_ver, skipped"
+            continue
+        fi
+        _kernels="$_kernels$_pkg $_ver
+"
+    done
+    _kernels=$(printf '%s' "$_kernels" | sort -u -k1,1)
+    if [ -z "$_kernels" ]; then
+        warn "no kernel found ($MODULES_DIR/*/pkgbase with $BOOT_DIR/vmlinuz-<pkgbase>)"
+        return 1
+    fi
+
+    # the preferred kernel gets the plain OS_ID label
+    _primary=""
+    if [ -n "$DEFAULT_KERNEL" ] && has_kernel "$DEFAULT_KERNEL"; then
+        _primary=$DEFAULT_KERNEL
+    elif has_kernel linux; then
+        _primary=linux
+    else
+        _primary=$(printf '%s\n' "$_kernels" | head -1 | cut -d' ' -f1)
+    fi
+
+    # CPU microcode is a separate early initrd on Arch; elilo takes one
+    # initrd, so prepend it (concatenated cpio archives are valid)
+    _ucode=""
+    if [ "$UCODE" = "auto" ]; then
+        for _u in "$BOOT_DIR"/*-ucode.img; do
+            [ -f "$_u" ] && _ucode="$_ucode$_u:"
+        done
+    fi
+
+    _ordered=$(printf '%s\n' "$_kernels" | awk -v p="$_primary" '$1 == p { print; next } { rest = rest $0 "\n" } END { printf "%s", rest }')
+
+    _oldifs=$IFS
+    IFS='
+'
+    for _k in $_ordered; do
+        IFS=$_oldifs
+        _pkg=${_k%% *}
+        _ver=${_k#* }
+        if [ "$_pkg" = "$_primary" ]; then
+            _label=$OS_ID
+        else
+            _suffix=${_pkg#linux-}
+            _suffix=${_suffix#"$OS_ID"-}
+            [ -z "$_suffix" ] || [ "$_suffix" = "$OS_ID" ] && _suffix=$_pkg
+            _label="$OS_ID-$_suffix"
+        fi
+
+        plan_copy "vmlinuz-$_pkg" "$BOOT_DIR/vmlinuz-$_pkg"
+        _iname=""
+        if [ -f "$BOOT_DIR/initramfs-$_pkg.img" ]; then
+            plan_copy "initramfs-$_pkg.img" "$_ucode$BOOT_DIR/initramfs-$_pkg.img"
+            _iname="initramfs-$_pkg.img"
+        else
+            warn "no $BOOT_DIR/initramfs-$_pkg.img — $_pkg will most likely not boot (run: mkinitcpio -P)"
+        fi
+        ENTRIES="$ENTRIES$(emit_linux_entry "$_label" "$OS_NAME ($_pkg $_ver)" "vmlinuz-$_pkg" "$_iname")
+"
+        if [ "$INCLUDE_FALLBACK" = "1" ] && [ -f "$BOOT_DIR/initramfs-$_pkg-fallback.img" ]; then
+            plan_copy "initramfs-$_pkg-fallback.img" "$_ucode$BOOT_DIR/initramfs-$_pkg-fallback.img"
+            ENTRIES="$ENTRIES$(emit_linux_entry "$_label-fallback" "$OS_NAME ($_pkg $_ver, fallback initramfs)" "vmlinuz-$_pkg" "initramfs-$_pkg-fallback.img")
+"
+        fi
+        IFS='
+'
+    done
+    IFS=$_oldifs
+}
+
+write_global_fragment() {
+    mkdir -p "$ENTRIES_DIR"
+    if [ -f "$GLOBAL_FRAG" ] && [ "$GLOBAL_OWNER" != "1" ]; then
+        return 0
+    fi
+    _tmp="$GLOBAL_FRAG.tmp.$$"
+    {
+        echo "# Global elilo settings, written by update-elilo on $OS_ID."
+        echo "# Change them in /etc/elilo/update.conf on that OS (GLOBAL_OWNER=1)."
+        echo "chooser=$CHOOSER"
+        if [ "$PROMPT" = "1" ]; then
+            echo "prompt"
+        else
+            # no menu, but a key pressed during the delay still opens it
+            echo "delay=$TIMEOUT"
+        fi
+        echo "timeout=$TIMEOUT"
+        echo "default=${DEFAULT:-$OS_ID}"
+    } > "$_tmp"
+    mv "$_tmp" "$GLOBAL_FRAG"
+}
+
+# ── Assemble elilo.conf from ELILO_DIR/entries/*.conf ───────────────────────
+
+assemble_conf() {
+    mkdir -p "$ENTRIES_DIR"
+    [ -f "$GLOBAL_FRAG" ] || write_global_fragment
+
+    _tmp="${ELILO_CONF}.tmp.$$"
+    _body="${ELILO_CONF}.body.$$"
+    trap 'rm -f "$_tmp" "$_body"' EXIT INT TERM
+
+    _labels=""
+    : > "$_body"
+    for _f in "$ENTRIES_DIR"/*.conf; do
+        [ -f "$_f" ] || continue
+        [ "$_f" = "$GLOBAL_FRAG" ] && continue
+        _fl=$(sed -n 's/^[[:space:]]*label[[:space:]]*=[[:space:]]*//p' "$_f" | tr -d '"')
+        _dup=""
+        for _l in $_fl; do
+            if printf '%s' "$_labels" | grep -Fxq "$_l"; then
+                _dup=$_l
+                break
+            fi
+        done
+        if [ -n "$_dup" ]; then
+            warn "label '$_dup' in ${_f##*/} is already used by another entry; ${_f##*/} skipped"
+            continue
+        fi
+        for _l in $_fl; do
+            _labels="$_labels$_l
+"
+        done
+        {
+            echo ""
+            echo "# ---- ${_f##*/} ----"
+            cat "$_f"
+        } >> "$_body"
+    done
+
+    _default=$(sed -n 's/^[[:space:]]*default[[:space:]]*=[[:space:]]*//p' "$GLOBAL_FRAG" | tail -1 | tr -d '"')
+    if [ -n "$_default" ] && ! printf '%s' "$_labels" | grep -Fxq "$_default"; then
+        _first=$(printf '%s' "$_labels" | head -1)
+        warn "default entry '$_default' does not exist; using '${_first:-none}'"
+        _default=$_first
+    fi
+    [ -n "$_labels" ] || warn "no boot entries at all in $ENTRIES_DIR"
+
+    {
+        echo "# Generated by update-elilo from $(esp_path "$ENTRIES_DIR")/*.conf -- do not edit."
+        echo "# Settings: /etc/elilo/update.conf on each OS sharing this ESP."
+        grep -v '^[[:space:]]*default[[:space:]]*=' "$GLOBAL_FRAG"
+        [ -n "$_default" ] && echo "default=$_default"
+        cat "$_body"
+    } > "$_tmp"
+    rm -f "$_body"
+    mv "$_tmp" "$ELILO_CONF"
+    trap - EXIT INT TERM
+    info "wrote $ELILO_CONF (default: ${_default:-first entry})"
+}
+
+fragment_update() {
+    check_esp
+
+    [ -n "$OS_NAME" ] || OS_NAME=$OS_ID
+    valid_label "$OS_ID" || die "OS_ID '$OS_ID' may only contain letters, digits, '.', '_' and '-'"
+
+    if [ -z "$ROOT_DEV" ]; then
+        ROOT_DEV=$(detect_root_dev)
+        [ -n "$ROOT_DEV" ] || die "could not detect root device; set ROOT_DEV in $CONFIG"
+    fi
+    EFF_APPEND=$(effective_append)
+
+    KDIR="$ELILO_DIR/$OS_ID"
+    KPATH=$(esp_path "$KDIR")
+    ENTRIES=""
+
+    case $LAYOUT in
+        debian) sync_debian "$1" || exit 0 ;;
+        arch)   sync_arch || exit 0 ;;
+        *)      die "unknown LAYOUT '$LAYOUT' in $CONFIG (expected debian or arch)" ;;
+    esac
+
+    check_space
+    run_plan
+
+    mkdir -p "$ENTRIES_DIR"
+    _frag="$ENTRIES_DIR/$ENTRY_ORDER-$OS_ID.conf"
+    {
+        echo "# $(conf_str "$OS_NAME") -- written by update-elilo, regenerated on every kernel update."
+        echo "# root: $ROOT_DEV"
+        printf '%s' "$ENTRIES"
+    } > "$_frag.tmp.$$"
+    mv "$_frag.tmp.$$" "$_frag"
+
+    write_global_fragment
+    assemble_conf
+
+    prune_kdir
+
+    # kernels left in ELILO_DIR itself by a 3.17.x (legacy) install
+    for _f in "$ELILO_DIR"/vmlinuz-* "$ELILO_DIR"/initrd.img-*; do
+        [ -f "$_f" ] || continue
+        info "removing legacy $(basename "$_f") from $ELILO_DIR"
+        rm -f "$_f"
+    done
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  --add-efi / --remove-entry
+# ═════════════════════════════════════════════════════════════════════════════
+
+# write_chainload_entry FILE LABEL DESCRIPTION ESP-PATH [PARTUUID]
+write_chainload_entry() {
+    mkdir -p "$ENTRIES_DIR"
+    {
+        echo "# $(conf_str "$3") -- $4"
+        echo "image=$4"
+        echo "  label=$2"
+        echo "  description=\"$(conf_str "$3")\""
+        [ -n "$5" ] && echo "  device=$5"
+        echo "  chainload"
+    } > "$1.tmp.$$"
+    mv "$1.tmp.$$" "$1"
+}
+
+label_in_use() {
+    grep -lsx "[[:space:]]*label[[:space:]]*=[[:space:]]*\"\{0,1\}$1\"\{0,1\}" "$ENTRIES_DIR"/*.conf 2>/dev/null | head -1
+}
+
+add_efi() {
+    need_fragment_mode "--add-efi"
+    check_esp
+    _label=$1 _desc=$2 _file=$3 _device=$4
+    [ -n "$_label" ] && [ -n "$_desc" ] && [ -n "$_file" ] || usage
+    valid_label "$_label" || die "label '$_label' may only contain letters, digits, '.', '_' and '-'"
+
+    _frag="$ENTRIES_DIR/70-$_label.conf"
+    _used=$(label_in_use "$_label")
+    if [ -n "$_used" ] && [ "$_used" != "$_frag" ]; then
+        die "label '$_label' is already used in $_used"
+    fi
+
+    if [ -n "$_device" ]; then
+        # FILE is a path on that partition, not copied
+        case $_file in /*) ;; *) _file="/$_file" ;; esac
+        _path=$_file
+    else
+        [ -f "$_file" ] || die "$_file does not exist"
+        _abs=$(readlink -f "$_file")
+        case $_abs in
+            "$ESP_ROOT"/*)
+                _path=$(esp_path "$_abs")
+                ;;
+            *)
+                mkdir -p "$ESP_ROOT/EFI/$_label"
+                install -m 644 "$_abs" "$ESP_ROOT/EFI/$_label/${_abs##*/}"
+                _path="/EFI/$_label/${_abs##*/}"
+                info "copied $_abs to $ESP_ROOT$_path"
+                ;;
+        esac
+    fi
+
+    write_chainload_entry "$_frag" "$_label" "$_desc" "$_path" "$_device"
+    info "added entry '$_label' ($_desc)"
+    assemble_conf
+}
+
+remove_entry() {
+    need_fragment_mode "--remove-entry"
+    check_esp
+    [ -n "$1" ] || usage
+    _f=$(label_in_use "$1")
+    [ -n "$_f" ] || die "no entry with label '$1'"
+    case ${_f##*/} in
+        60-scan-*|70-*) ;;
+        *) die "'$1' is managed by update-elilo on its OS (${_f##*/}); it cannot be removed here" ;;
+    esac
+    rm -f "$_f"
+    info "removed entry '$1'"
+    assemble_conf
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  --scan: find other OSes and boot loaders
+# ═════════════════════════════════════════════════════════════════════════════
+
+SCAN_MNTS=""
+
+scan_cleanup() {
+    for _m in $SCAN_MNTS; do
+        umount "$_m" 2>/dev/null || true
+        rmdir "$_m" 2>/dev/null || true
+    done
+}
+
+# mount_ro DEV FSTYPE → prints a mount point (existing one, or a temporary one)
+mount_ro() {
+    _mp=$(findmnt -rno TARGET -S "$1" 2>/dev/null | head -1)
+    if [ -n "$_mp" ]; then
+        printf '%s\n' "$_mp"
+        return 0
+    fi
+    _mp=$(mktemp -d "${TMPDIR:-/tmp}/elilo-scan.XXXXXX")
+    if mount -o ro -t "$2" "$1" "$_mp" 2>/dev/null; then
+        SCAN_MNTS="$SCAN_MNTS $_mp"
+        printf '%s\n' "$_mp"
+        return 0
+    fi
+    rmdir "$_mp"
+    return 1
+}
+
+# pretty name for an ESP vendor directory
+vendor_name() {
+    case $(printf '%s' "$1" | tr 'A-Z' 'a-z') in
+        microsoft)   echo "Windows" ;;
+        arch)        echo "Arch Linux" ;;
+        cachyos)     echo "CachyOS" ;;
+        endeavouros) echo "EndeavourOS" ;;
+        manjaro)     echo "Manjaro" ;;
+        artix)       echo "Artix Linux" ;;
+        debian)      echo "Debian" ;;
+        devuan)      echo "Devuan" ;;
+        ubuntu)      echo "Ubuntu" ;;
+        linuxmint)   echo "Linux Mint" ;;
+        pop)         echo "Pop!_OS" ;;
+        fedora)      echo "Fedora" ;;
+        opensuse*)   echo "openSUSE" ;;
+        void)        echo "Void Linux" ;;
+        gentoo)      echo "Gentoo" ;;
+        slackware)   echo "Slackware" ;;
+        mx)          echo "MX Linux" ;;
+        antix)       echo "antiX" ;;
+        *)           printf '%s\n' "$1" ;;
+    esac
+}
+
+# make LABEL unique among existing and newly found entries
+unique_label() {
+    _base=$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9._\n-' '-')
+    _try=$_base
+    _i=2
+    while printf '%s' "$SCAN_LABELS" | grep -Fxq "$_try" || \
+          { _u=$(label_in_use "$_try"); [ -n "$_u" ] && case ${_u##*/} in 60-scan-*) false ;; *) true ;; esac; }; do
+        _try="$_base-$_i"
+        _i=$((_i + 1))
+    done
+    SCAN_LABELS="$SCAN_LABELS$_try
+"
+    printf '%s\n' "$_try"
+}
+
+# SCAN_FOUND lines: label|description|esp-path|partuuid(empty = elilo's ESP)|where
+SCAN_FOUND=""
+SCAN_LABELS=""
+
+scan_add() {
+    SCAN_FOUND="$SCAN_FOUND$1|$2|$3|$4|$5
+"
+}
+
+# scan_esp DEV MOUNTPOINT IS-OWN-ESP PARTUUID
+scan_esp() {
+    _mnt=$2
+    [ -d "$_mnt" ] || return 0
+    _efidir=$(find "$_mnt" -mindepth 1 -maxdepth 1 -iname efi -type d 2>/dev/null | head -1)
+    [ -n "$_efidir" ] || return 0
+    _own_elilo=$(basename "$ELILO_DIR" | tr 'A-Z' 'a-z')
+    _found_here=0
+
+    for _vdir in "$_efidir"/*/; do
+        [ -d "$_vdir" ] || continue
+        _vendor=$(basename "$_vdir")
+        _lv=$(printf '%s' "$_vendor" | tr 'A-Z' 'a-z')
+        [ "$_lv" = "boot" ] && continue
+        if [ "$3" = "1" ]; then
+            # elilo itself and loaders it manages
+            [ "$_lv" = "$_own_elilo" ] && continue
+            case $_lv in haiku-*) continue ;; esac
+            [ -f "$ENTRIES_DIR/70-$_lv.conf" ] && continue
+        fi
+
+        _loader="" _kind=""
+        for _cand in bootmgfw.efi shimx64.efi grubx64.efi systemd-bootx64.efi refind_x64.efi; do
+            _hit=$(find "$_vdir" -maxdepth 2 -type f -iname "$_cand" 2>/dev/null | head -1)
+            if [ -n "$_hit" ]; then
+                _loader=$_hit
+                case $_cand in
+                    bootmgfw.efi)        _kind="Boot Manager" ;;
+                    shimx64.efi|grubx64.efi) _kind="GRUB" ;;
+                    systemd-bootx64.efi) _kind="systemd-boot" ;;
+                    refind_x64.efi)      _kind="rEFInd" ;;
+                esac
+                break
+            fi
+        done
+        if [ -z "$_loader" ]; then
+            _hit=$(find "$_vdir" -maxdepth 1 -type f -iname 'limine*.efi' 2>/dev/null | head -1)
+            [ -n "$_hit" ] && _loader=$_hit _kind="Limine"
+        fi
+        [ -n "$_loader" ] || continue
+
+        _name=$(vendor_name "$_vendor")
+        if [ "$_kind" = "Boot Manager" ]; then
+            _desc="$_name Boot Manager"
+        else
+            _desc="$_name ($_kind)"
+        fi
+        # "<vendor>-<loader>" so it cannot clash with an OS's own label
+        case $_kind in
+            "Boot Manager") _lbl=$(unique_label "$([ "$_lv" = microsoft ] && echo windows || echo "$_vendor")") ;;
+            *)              _lbl=$(unique_label "$_vendor-$(printf '%s' "$_kind" | tr 'A-Z' 'a-z')") ;;
+        esac
+        _dev=""
+        [ "$3" = "1" ] || _dev=$4
+        scan_add "$_lbl" "$_desc" "/${_loader#"$_mnt"/}" "$_dev" "$1"
+        _found_here=1
+    done
+
+    # removable-media fallback loader, only if nothing better is on this ESP
+    if [ $_found_here -eq 0 ] && [ "$3" != "1" ]; then
+        _hit=$(find "$_efidir" -maxdepth 2 -type f -ipath '*/boot/bootx64.efi' 2>/dev/null | head -1)
+        if [ -n "$_hit" ]; then
+            _lbl=$(unique_label "efi-$(printf '%s' "$4" | cut -c1-8)")
+            scan_add "$_lbl" "EFI loader on $1" "/${_hit#"$_mnt"/}" "$4" "$1"
+        fi
+    fi
+}
+
+# Haiku has no ESP of its own: copy its EFI loader onto elilo's ESP.
+# The loader finds the Haiku boot volume itself.
+scan_haiku() {
+    _dev=$1 _puuid=$2
+    if ! grep -qw befs /proc/filesystems 2>/dev/null; then
+        modprobe befs 2>/dev/null || true
+    fi
+    if ! _mnt=$(mount_ro "$_dev" befs); then
+        warn "Haiku partition $_dev found but cannot be mounted (no befs support in this kernel?)
+  Copy haiku_loader.efi from the Haiku install or ISO by hand, then run:
+  update-elilo --add-efi haiku \"Haiku\" /path/to/haiku_loader.efi"
+        return 0
+    fi
+    _hl=$(find "$_mnt/system/data/platform_loaders" -maxdepth 1 -type f -iname 'haiku_loader*.efi' 2>/dev/null | head -1)
+    [ -n "$_hl" ] || _hl=$(find "$_mnt/system" -maxdepth 4 -type f -iname 'haiku_loader*.efi' 2>/dev/null | head -1)
+    if [ -z "$_hl" ]; then
+        warn "no haiku_loader.efi found on $_dev
+  Copy it from the Haiku ISO by hand, then run:
+  update-elilo --add-efi haiku \"Haiku\" /path/to/haiku_loader.efi"
+        return 0
+    fi
+    _short=$(printf '%s' "$_puuid" | tr -dc 'a-z0-9' | cut -c1-8)
+    _dir="EFI/haiku-${_short:-loader}"
+    _lbl=$(unique_label haiku)
+    # copied only when the entry is accepted
+    scan_add "$_lbl" "Haiku" "/$_dir/haiku_loader.efi" "" "$_dev"
+    HAIKU_COPIES="$HAIKU_COPIES$_lbl|$_hl|$_dir
+"
+}
+HAIKU_COPIES=""
+
+scan_others() {
+    need_fragment_mode "--scan"
+    check_esp
+    [ "$(id -u)" = "0" ] || die "--scan must be run as root"
+    _yes=$1
+
+    trap scan_cleanup EXIT INT TERM
+
+    _own_dev=$(findmnt -n -o SOURCE "$ESP_ROOT" 2>/dev/null | head -1)
+    _own_real=$(readlink -f "$_own_dev" 2>/dev/null || printf '%s' "$_own_dev")
+
+    for _p in $(list_partitions); do
+        _real=$(readlink -f "$_p")
+        _ptype=$(part_field "$_p" PARTTYPE)
+        _fstype=$(part_field "$_p" FSTYPE)
+        _puuid=$(part_field "$_p" PARTUUID)
+
+        # the file system decides: Haiku installs are known to carry the
+        # EFI System partition type on a BFS partition
+        if [ "$_fstype" = "befs" ]; then
+            scan_haiku "$_p" "$_puuid"
+        elif [ "$_ptype" = "$ESP_PARTTYPE_GPT" ] || [ "$_ptype" = "0xef" ]; then
+            case $_fstype in vfat|"") ;; *) continue ;; esac
+            if [ "$_real" = "$_own_real" ]; then
+                scan_esp "$_p" "$ESP_ROOT" 1 "$_puuid"
+            elif [ -n "$_puuid" ] && _m=$(mount_ro "$_p" vfat); then
+                scan_esp "$_p" "$_m" 0 "$_puuid"
+            fi
+        fi
+    done
+
+    if [ -z "$SCAN_FOUND" ]; then
+        info "no other OS or boot loader found"
+    else
+        echo "update-elilo: found:"
+    fi
+
+    # replace everything a previous scan added
+    rm -f "$ENTRIES_DIR"/60-scan-*.conf
+    mkdir -p "$ENTRIES_DIR"
+
+    _oldifs=$IFS
+    IFS='
+'
+    for _e in $SCAN_FOUND; do
+        IFS='|' read -r _lbl _desc _path _dev _where <<EOF
+$_e
+EOF
+        IFS='
+'
+        printf '  %-16s %s  (%s on %s)\n' "$_lbl" "$_desc" "$_path" "$_where"
+        if [ "$_yes" != "1" ]; then
+            printf '    add to the elilo menu? [Y/n] '
+            read -r _ans </dev/tty || _ans=n
+            case $_ans in n|N|no|NO) continue ;; esac
+        fi
+        for _c in $HAIKU_COPIES; do
+            if [ "${_c%%|*}" = "$_lbl" ]; then
+                _rest=${_c#*|}
+                _src=${_rest%%|*}
+                _dir=${_rest#*|}
+                mkdir -p "$ESP_ROOT/$_dir"
+                install -m 644 "$_src" "$ESP_ROOT/$_dir/haiku_loader.efi"
+                info "copied $_src to $ESP_ROOT/$_dir/haiku_loader.efi"
+            fi
+        done
+        write_chainload_entry "$ENTRIES_DIR/60-scan-$_lbl.conf" "$_lbl" "$_desc" "$_path" "$_dev"
+        sed -i '1i # managed by update-elilo --scan; re-run it to refresh' "$ENTRIES_DIR/60-scan-$_lbl.conf"
+    done
+    IFS=$_oldifs
+
+    scan_cleanup
+    trap - EXIT INT TERM
+    SCAN_MNTS=""
+    assemble_conf
+}
+
+usage() {
+    sed -n '/^# Usage:/,/^# Two modes/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2
+    exit 2
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+
+case ${1:-} in
+    --scan)
+        _y=0
+        [ "${2:-}" = "--yes" ] && _y=1
+        scan_others "$_y"
+        ;;
+    --add-efi)
+        shift
+        _dev=""
+        if [ "${4:-}" = "--device" ]; then
+            [ -n "${5:-}" ] || usage
+            _dev=$(printf '%s' "$5" | tr 'A-Z' 'a-z')
+        fi
+        add_efi "${1:-}" "${2:-}" "${3:-}" "$_dev"
+        ;;
+    --remove-entry)
+        remove_entry "${2:-}"
+        ;;
+    -h|--help)
+        usage
+        ;;
+    -*)
+        usage
+        ;;
+    *)
+        if [ -n "$OS_ID" ]; then
+            fragment_update "${1:-}"
+        else
+            legacy_update "${1:-}"
+        fi
+        ;;
+esac

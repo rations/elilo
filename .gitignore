@@ -6,3 +6,6 @@ tools/eliloalt
 
 # Downloaded packages kept for reference — install via: apt-get install gnu-efi
 *.deb
+
+# Local working notes (not part of the project)
+CLAUDE.md

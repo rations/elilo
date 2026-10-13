@@ -154,6 +154,19 @@ wait_timeout(UINTN timeout)
 	return idx ? 1 : 0;
 }
 
+/*
+ * block until a key is pressed, and swallow it
+ */
+VOID
+wait_keypress(VOID)
+{
+	EFI_INPUT_KEY key;
+	UINTN idx;
+
+	uefi_call_wrapper(BS->WaitForEvent, 3, 1, &systab->ConIn->WaitForKey, &idx);
+	uefi_call_wrapper(systab->ConIn->ReadKeyStroke, 2, systab->ConIn, &key);
+}
+
 INTN
 argify(CHAR16 *buf, UINTN len, CHAR16 **argv)   
 {

@@ -232,6 +232,28 @@ main_loop(EFI_HANDLE dev, CHAR16 **argv, INTN argc, INTN index, EFI_HANDLE image
 			goto exit_error;
 		}
 
+		if (elilo_opt.chainload) {
+			CHAR16 *opts = cmdline_tmp;
+
+			/* drop the BOOT_IMAGE= word, the rest is the append= line */
+			while (*opts && *opts != L' ') opts++;
+			while (*opts == L' ') opts++;
+			r = subst_vars(opts, cmdline, CMDLINE_MAXLEN);
+
+			chainload_image(dev, image, kname, elilo_opt.chain_device, cmdline);
+
+			/* it returned: wait so any error can be read, then back to the menu */
+			Print(L"\nPress any key to return to the boot menu...");
+			wait_keypress();
+			Print(L"\n");
+
+			elilo_opt.initrd[0] = elilo_opt.vmcode[0] = CHAR_NULL;
+			elilo_opt.prompt    = 1;
+			elilo_opt.timeout   = ELILO_TIMEOUT_INFINITY;
+			elilo_opt.delay     = 0;
+			continue;
+		}
+
 		switch (kernel_load(image, kname, &kd, &imem, &mmem)) {
 			case ELILO_LOAD_SUCCESS:
 				goto do_launch;

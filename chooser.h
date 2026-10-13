@@ -54,6 +54,7 @@ typedef struct {
 
 extern INTN init_chooser(EFI_HANDLE);
 extern INTN exist_chooser(CHAR16 *name);
+extern INTN chooser_build_cmdline(CHAR16 *kname, CHAR16 *args, CHAR16 *cmdline);
 
 extern chooser_func_t *kernel_chooser;
 

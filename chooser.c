@@ -36,12 +36,23 @@
 #include "choosers/textmenu.h"
 #endif
 
+#ifdef CONFIG_CHOOSER_MENU
+#include "choosers/menu.h"
+#endif
+
+/*
+ * the first chooser that probes ok is the default when the config
+ * file does not name one, so keep simple first for existing configs
+ */
 static chooser_t *choosers_tab[]={
 #ifdef CONFIG_CHOOSER_SIMPLE
 	&simple_chooser,
 #endif
 #ifdef CONFIG_CHOOSER_TEXTMENU
 	&textmenu_chooser,
+#endif
+#ifdef CONFIG_CHOOSER_MENU
+	&menu_chooser,
 #endif
 	NULL
 };
@@ -112,3 +123,54 @@ exist_chooser(CHAR16 *name)
 	return -1;
 }
 
+
+/*
+ * Build the final kernel command line: BOOT_IMAGE=<dev:path> <args>
+ * The device name and default path are added to kname when it does not
+ * already name a device, so the kernel knows where it came from.
+ * Return:
+ * 	-1: the result does not fit in CMDLINE_MAXLEN
+ * 	 0: otherwise
+ */
+INTN
+chooser_build_cmdline(CHAR16 *kname, CHAR16 *args, CHAR16 *cmdline)
+{
+#define BOOT_IMG_STR	L"BOOT_IMAGE="
+	CHAR16 devname[PATHNAME_MAXLEN];
+	CHAR16 dpath[FILENAME_MAXLEN];
+	CHAR16 *slash_pos, *colon_pos, *backslash_pos;
+	CHAR16 *img = elilo_opt.vmcode[0] ? elilo_opt.vmcode : kname;
+	UINTN len;
+
+	slash_pos     = StrChr(kname, L'/');
+	backslash_pos = StrChr(kname, L'\\');
+	colon_pos     = StrChr(kname, L':');
+
+	if (backslash_pos && (slash_pos == NULL || backslash_pos < slash_pos)) slash_pos = backslash_pos;
+
+	if (colon_pos == NULL || (slash_pos && (slash_pos < colon_pos))) {
+		StrCpy(devname, fops_bootdev_name());
+		StrCat(devname, L":");
+
+		/* the default path is always terminated with a separator */
+		if (kname[0] != L'/' && kname[0] != L'\\') {
+			fops_getdefault_path(dpath, FILENAME_MAXLEN);
+			StrCat(devname, dpath);
+		}
+	} else {
+		devname[0] = CHAR_NULL;
+	}
+
+	len = StrLen(BOOT_IMG_STR) + StrLen(devname) + StrLen(img) + 1 + StrLen(args);
+	if (len >= CMDLINE_MAXLEN-1) {
+		ERR_PRT((L" arguments list too long cannot fit BOOT_IMAGE\n"));
+		return -1;
+	}
+	StrCpy(cmdline, BOOT_IMG_STR);
+	StrCat(cmdline, devname);
+	StrCat(cmdline, img);
+	StrCat(cmdline, L" ");
+	StrCat(cmdline, args);
+
+	return 0;
+}

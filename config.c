@@ -77,10 +77,12 @@ typedef struct boot_image {
 	CHAR16	root[FILENAME_MAXLEN];
 	CHAR16	fallback[MAX_STRING];
 	CHAR16	description[MAX_STRING];
+	CHAR16	device[MAX_STRING];	/* PARTUUID of the partition holding a chainload image */
 
 	UINTN	ramdisk;
 	UINTN	readonly;
 	UINTN	literal;
+	UINTN	chainload;	/* image is an EFI binary started with LoadImage/StartImage */
 
 	sys_img_options_t sys_img_opts;	/* architecture specific image options */
 } boot_image_t;
@@ -180,6 +182,8 @@ static config_option_t image_common_options[]={
     {OPT_STR,	OPT_IMAGE,	L"label",	NULL,		NULL,	opt_offsetof(label)},
     {OPT_FILE,	OPT_IMAGE,	L"image",	do_image,	NULL,	opt_offsetof(kname)},
     {OPT_STR,	OPT_IMAGE,	L"description",	NULL,		NULL,	opt_offsetof(description)},
+    {OPT_BOOL,	OPT_IMAGE,	L"chainload",	NULL,		NULL,	opt_offsetof(chainload)},
+    {OPT_STR,	OPT_IMAGE,	L"device",	NULL,		NULL,	opt_offsetof(device)},
 };
 
 #define OPTION_IS_GLOBAL(p)	((p)->scope == OPT_GLOBAL)
@@ -945,6 +949,15 @@ get_next_description(VOID *prev, CHAR16 **label, CHAR16 **description)
 }
 
 /*
+ * label of the default image (default= or first image), NULL if none
+ */
+CHAR16 *
+get_default_label(VOID)
+{
+	return global_config.default_image ? global_config.default_image->label : NULL;
+}
+
+/*
  * find a description using the label name
  * return NULL if label not found or no description defined
  */
@@ -1028,10 +1041,26 @@ find_label(CHAR16 *label, CHAR16 *kname, CHAR16 *options, CHAR16 *initrd, CHAR16
 
 	/* make sure we don't get garbage here */
 	elilo_opt.sys_img_opts = NULL;
+	elilo_opt.chainload = 0;
+	elilo_opt.chain_device[0] = CHAR_NULL;
 
 	return -1;
 found:
 	StrCpy(kname, img->kname);
+
+	elilo_opt.chainload = img->chainload;
+	StrCpy(elilo_opt.chain_device, img->device);
+
+	/*
+	 * a chainloaded EFI binary only gets its own append= line:
+	 * global root=, ro, initrd and vmm are Linux kernel options
+	 */
+	if (img->chainload) {
+		initrd[0] = vmcode[0] = CHAR_NULL;
+		StrCpy(options, img->options);
+		elilo_opt.sys_img_opts = &img->sys_img_opts;
+		return 0;
+	}
 
 	/* per image initrd has precedence over global initrd */
 	if (img->initrd[0]) 

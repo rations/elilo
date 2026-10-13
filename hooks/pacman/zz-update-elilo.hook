@@ -1,0 +1,28 @@
+# /etc/pacman.d/hooks/zz-update-elilo.hook
+# Copies the kernels and initramfs images to the ESP and regenerates
+# elilo.conf after any change that makes mkinitcpio rebuild an initramfs.
+# Sorts after 90-mkinitcpio-install.hook, so the new images already exist.
+# update-elilo syncs every installed kernel, so one hook covers install,
+# upgrade and removal.
+
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = usr/lib/modules/*/vmlinuz
+Target = usr/lib/initcpio/*
+Target = usr/lib/firmware/*
+Target = usr/src/*/dkms.conf
+Target = boot/*-ucode.img
+
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = mkinitcpio
+
+[Action]
+Description = Updating elilo kernels on the ESP...
+When = PostTransaction
+Exec = /usr/local/sbin/update-elilo
