@@ -47,8 +47,9 @@
 	* tests/: update-elilo test suites (legacy output identical to 3.17.2,
 	  fragment mode, --scan, ESP root detection) using shims and fixture
 	  trees; run with sh tests/run.sh.
-	* README.md: install for any distribution, boot menu, multi-boot,
-	  chainloading, Changes in 3.18.
+	* README.md: install for any distribution, boot menu (with a
+	  screenshot, docs/boot-menu.png), editing kernel options and the
+	  command line, multi-boot, chainloading, Changes in 3.18.
 
 2026-06-23 rations <ehqcar@proton.me>
 	* elilo 3.17.2 — Linux 7.x support and update-elilo robustness

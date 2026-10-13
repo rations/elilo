@@ -1,5 +1,7 @@
 # elilo 3.18 — EFI Linux Loader
 
+![elilo 3.18 boot menu: Devuan, CachyOS, GRUB and Haiku entries with a countdown](docs/boot-menu.png)
+
 elilo is an EFI/UEFI bootloader for Linux. It loads the kernel and initrd
 directly from the EFI System Partition (ESP) and passes control to the kernel
 via the EFI Handover Protocol.
@@ -34,6 +36,8 @@ for the full list of copyright holders.
 3. [Installation](#installation)
    - [Quick Install](#quick-install)
    - [The Boot Menu](#the-boot-menu)
+     - [Editing kernel options](#editing-kernel-options)
+     - [The command line](#the-command-line)
    - [Multi-boot: other OSes in the menu](#multi-boot-other-oses-in-the-menu)
    - [Coexisting with GRUB](#coexisting-with-grub)
    - [Finding Your EFI System Partition](#finding-your-efi-system-partition)
@@ -184,14 +188,87 @@ Booting "Devuan GNU/Linux (7.0.12+deb14-amd64)" in 5 s. Press any key to stop.
 | ↑ / ↓, PgUp / PgDn, Home / End | move the selection |
 | `1`–`9` | jump to that entry |
 | Enter | boot the selected entry |
-| `e` | edit the kernel options of the selected entry, then Enter to boot (Esc cancels) |
-| `c` or Tab | switch to the classic `ELILO boot:` prompt (all the old commands: Tab lists labels, `=` devices, `%` variables, ...) |
+| `e` | [edit the kernel options](#editing-kernel-options) of the selected entry for this boot |
+| `c` or Tab | switch to the classic `ELILO boot:` [command line](#the-command-line) |
 
 With `PROMPT=0` in `update.conf`, elilo boots the default without showing the
 menu; pressing a key before `TIMEOUT` runs out still opens it.
 
 Hand-written `elilo.conf` files that do not set `chooser=` keep the classic
 prompt; add `chooser=menu` to use the menu.
+
+#### Editing kernel options
+
+Press `e` on an entry to see the full command line elilo is about to pass to
+the kernel, for example:
+
+```
+Options for "Devuan GNU/Linux (6.12.111+deb13-amd64)"
+Enter boots with these options, Esc cancels, Ctrl-U clears the line.
+
+root=UUID=0a1b2c3d-4e5f-6789-abcd-ef0123456789 ro quiet
+```
+
+| Key | Action |
+|---|---|
+| typing | adds characters at the end of the line |
+| Backspace | deletes the last character |
+| Ctrl-U | clears the whole line |
+| Enter | boots the entry with the edited line |
+| Esc | returns to the menu without changing anything |
+
+The line replaces the entry's options for **this boot only**: nothing is
+written to disk, and the next boot uses `elilo.conf` again. The kernel and
+initrd stay those of the entry. Only plain ASCII characters can be typed, and
+there is no cursor movement: to change something in the middle, delete back to
+it with Backspace, or clear the line with Ctrl-U and type it again.
+
+Keep the `root=` part, or the kernel will not find its root file system.
+Common one-off changes:
+
+| Change | Why |
+|---|---|
+| remove `quiet` | see the kernel and init messages while booting |
+| add `nomodeset` | get a picture when the graphics driver fails |
+| add `single` | boot to single-user (rescue) mode |
+| add `init=/bin/sh` | get a root shell without running init, to repair a broken system |
+
+For a chainloaded entry (another boot loader) the line holds the load options
+passed to that loader, and is usually empty.
+
+To change the options permanently, edit `APPEND` in `/etc/elilo/update.conf`
+and run `sudo update-elilo`.
+
+#### The command line
+
+Press `c` (or Tab) in the menu for the classic `ELILO boot:` prompt, the
+interface of elilo 3.17 and earlier. It waits without a countdown until you
+press Enter.
+
+**Booting:**
+
+| Type | Result |
+|---|---|
+| Enter on an empty line | boots the default entry |
+| a label, e.g. `devuan` | boots that entry (the label, not the description; Tab lists them) |
+| a label and options, e.g. `devuan nomodeset` | boots that entry with the options **added** to its own |
+| a kernel path and options, e.g. `/EFI/elilo/devuan/vmlinuz-6.12.111+deb13-amd64 root=UUID=... ro` | boots any kernel on the ESP, without an initrd; a device from the `=` list can come first, as `dev_name:/path` |
+
+**Information** (only as the first character on the line):
+
+| Key | Shows |
+|---|---|
+| Tab | the list of labels; after a label, e.g. `devuan` then Tab, that entry's description, command line and initrd |
+| `=` | the devices elilo can read, with the names to use in `dev_name:` |
+| `%` | elilo's variables |
+| `&` | the boot device, default path and config file in use |
+| `?` | a short help |
+
+**Editing:** Backspace deletes a character, Ctrl-U clears the line, Ctrl-C
+starts a new line, and Ctrl-D leaves elilo so the firmware moves on to its next
+boot option.
+
+There is no way back to the menu from the prompt; reboot to see it again.
 
 ---
 
