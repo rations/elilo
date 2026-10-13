@@ -66,6 +66,7 @@ ENTRIES_DIR="$ELILO_DIR/entries"
 GLOBAL_FRAG="$ENTRIES_DIR/00-global.conf"
 
 ESP_PARTTYPE_GPT=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+HAIKU_PARTTYPE_GPT=42465331-3ba3-10f1-802a-4861696b7521
 
 info() { echo "update-elilo: $*"; }
 warn() { echo "update-elilo: WARNING: $*" >&2; }
@@ -131,6 +132,18 @@ part_field() {
         _v=$(blkid -p -o value -s "$_k" "$1" 2>/dev/null | head -1)
     fi
     printf '%s\n' "$_v" | tr 'A-Z' 'a-z'
+}
+
+# part_location DEV → "DISK NUMBER", e.g. "/dev/sdb 1"; empty if unknown
+part_location() {
+    _sys=/sys/class/block/$(basename "$(readlink -f "$1")")
+    if [ -r "$_sys/partition" ]; then
+        printf '/dev/%s %s\n' "$(basename "$(dirname "$(readlink -f "$_sys")")")" "$(cat "$_sys/partition")"
+        return 0
+    fi
+    _pk=$(lsblk -dno PKNAME "$1" 2>/dev/null | head -1)
+    _pn=$(blkid -p -o value -s PART_ENTRY_NUMBER "$1" 2>/dev/null | head -1)
+    [ -n "$_pk" ] && [ -n "$_pn" ] && printf '/dev/%s %s\n' "${_pk#/dev/}" "$_pn"
 }
 
 list_partitions() {
@@ -806,8 +819,6 @@ unique_label() {
         _try="$_base-$_i"
         _i=$((_i + 1))
     done
-    SCAN_LABELS="$SCAN_LABELS$_try
-"
     printf '%s\n' "$_try"
 }
 
@@ -815,8 +826,11 @@ unique_label() {
 SCAN_FOUND=""
 SCAN_LABELS=""
 
+# (unique_label runs in $(...), so the label is recorded here)
 scan_add() {
     SCAN_FOUND="$SCAN_FOUND$1|$2|$3|$4|$5
+"
+    SCAN_LABELS="$SCAN_LABELS$1
 "
 }
 
@@ -837,12 +851,17 @@ scan_esp() {
         if [ "$3" = "1" ]; then
             # elilo itself and loaders it manages
             [ "$_lv" = "$_own_elilo" ] && continue
-            case $_lv in haiku-*) continue ;; esac
             [ -f "$ENTRIES_DIR/70-$_lv.conf" ] && continue
         fi
 
         _loader="" _kind=""
-        for _cand in bootmgfw.efi shimx64.efi grubx64.efi systemd-bootx64.efi refind_x64.efi; do
+        case $_lv in
+            haiku*)
+                _hit=$(find "$_vdir" -maxdepth 1 -type f \( -iname 'haiku_loader*.efi' -o -iname 'bootx64.efi' \) 2>/dev/null | head -1)
+                [ -n "$_hit" ] && _loader=$_hit _kind="Haiku"
+                ;;
+        esac
+        [ -n "$_loader" ] || for _cand in bootmgfw.efi shimx64.efi grubx64.efi systemd-bootx64.efi refind_x64.efi; do
             _hit=$(find "$_vdir" -maxdepth 2 -type f -iname "$_cand" 2>/dev/null | head -1)
             if [ -n "$_hit" ]; then
                 _loader=$_hit
@@ -864,12 +883,16 @@ scan_esp() {
         _name=$(vendor_name "$_vendor")
         if [ "$_kind" = "Boot Manager" ]; then
             _desc="$_name Boot Manager"
+        elif [ "$_kind" = "Haiku" ]; then
+            _desc="Haiku"
+            SCAN_HAIKU_LOADER=1
         else
             _desc="$_name ($_kind)"
         fi
         # "<vendor>-<loader>" so it cannot clash with an OS's own label
         case $_kind in
             "Boot Manager") _lbl=$(unique_label "$([ "$_lv" = microsoft ] && echo windows || echo "$_vendor")") ;;
+            Haiku)          _lbl=$(unique_label haiku) ;;
             *)              _lbl=$(unique_label "$_vendor-$(printf '%s' "$_kind" | tr 'A-Z' 'a-z')") ;;
         esac
         _dev=""
@@ -881,43 +904,41 @@ scan_esp() {
     # removable-media fallback loader, only if nothing better is on this ESP
     if [ $_found_here -eq 0 ] && [ "$3" != "1" ]; then
         _hit=$(find "$_efidir" -maxdepth 2 -type f -ipath '*/boot/bootx64.efi' 2>/dev/null | head -1)
-        if [ -n "$_hit" ]; then
+        if [ -n "$_hit" ] && grep -q 'Haiku boot loader' "$_hit" 2>/dev/null; then
+            scan_add "$(unique_label haiku)" "Haiku" "/${_hit#"$_mnt"/}" "$4" "$1"
+            SCAN_HAIKU_LOADER=1
+        elif [ -n "$_hit" ]; then
             _lbl=$(unique_label "efi-$(printf '%s' "$4" | cut -c1-8)")
             scan_add "$_lbl" "EFI loader on $1" "/${_hit#"$_mnt"/}" "$4" "$1"
         fi
     fi
 }
 
-# Haiku has no ESP of its own: copy its EFI loader onto elilo's ESP.
-# The loader finds the Haiku boot volume itself.
+# Haiku on BFS. Its EFI loader lives inside Haiku's system package, which
+# Linux cannot unpack, so the loader has to come from an ESP (found by
+# scan_esp) or be added with --add-efi. Haiku's loader only picks a GPT
+# partition by itself when it has the Haiku BFS partition type.
 scan_haiku() {
-    _dev=$1 _puuid=$2
-    if ! grep -qw befs /proc/filesystems 2>/dev/null; then
-        modprobe befs 2>/dev/null || true
+    HAIKU_PARTS="$HAIKU_PARTS $1"
+    case $2 in
+        *-*-*-*-*) ;;   # GPT; MBR disks are found by the loader regardless
+        *) return 0 ;;
+    esac
+    [ "$2" = "$HAIKU_PARTTYPE_GPT" ] && return 0
+    if [ "$2" = "$ESP_PARTTYPE_GPT" ]; then _tn="EFI System"; else _tn=$2; fi
+    _loc=$(part_location "$1")
+    if [ -n "$_loc" ]; then
+        _fix="sfdisk --part-type $_loc $HAIKU_PARTTYPE_GPT"
+    else
+        _fix="set the partition type of $1 to $HAIKU_PARTTYPE_GPT (Haiku BFS)"
     fi
-    if ! _mnt=$(mount_ro "$_dev" befs); then
-        warn "Haiku partition $_dev found but cannot be mounted (no befs support in this kernel?)
-  Copy haiku_loader.efi from the Haiku install or ISO by hand, then run:
-  update-elilo --add-efi haiku \"Haiku\" /path/to/haiku_loader.efi"
-        return 0
-    fi
-    _hl=$(find "$_mnt/system/data/platform_loaders" -maxdepth 1 -type f -iname 'haiku_loader*.efi' 2>/dev/null | head -1)
-    [ -n "$_hl" ] || _hl=$(find "$_mnt/system" -maxdepth 4 -type f -iname 'haiku_loader*.efi' 2>/dev/null | head -1)
-    if [ -z "$_hl" ]; then
-        warn "no haiku_loader.efi found on $_dev
-  Copy it from the Haiku ISO by hand, then run:
-  update-elilo --add-efi haiku \"Haiku\" /path/to/haiku_loader.efi"
-        return 0
-    fi
-    _short=$(printf '%s' "$_puuid" | tr -dc 'a-z0-9' | cut -c1-8)
-    _dir="EFI/haiku-${_short:-loader}"
-    _lbl=$(unique_label haiku)
-    # copied only when the entry is accepted
-    scan_add "$_lbl" "Haiku" "/$_dir/haiku_loader.efi" "" "$_dev"
-    HAIKU_COPIES="$HAIKU_COPIES$_lbl|$_hl|$_dir
-"
+    warn "$1 holds Haiku (BFS) but its partition type is $_tn,
+  so Haiku's boot loader will not find it and stops at its boot menu.
+  To fix (changes only the partition type, not the data):
+    $_fix"
 }
-HAIKU_COPIES=""
+HAIKU_PARTS=""
+SCAN_HAIKU_LOADER=0
 
 scan_others() {
     need_fragment_mode "--scan"
@@ -939,7 +960,7 @@ scan_others() {
         # the file system decides: Haiku installs are known to carry the
         # EFI System partition type on a BFS partition
         if [ "$_fstype" = "befs" ]; then
-            scan_haiku "$_p" "$_puuid"
+            scan_haiku "$_p" "$_ptype"
         elif [ "$_ptype" = "$ESP_PARTTYPE_GPT" ] || [ "$_ptype" = "0xef" ]; then
             case $_fstype in vfat|"") ;; *) continue ;; esac
             if [ "$_real" = "$_own_real" ]; then
@@ -949,6 +970,16 @@ scan_others() {
             fi
         fi
     done
+
+    if [ -n "$HAIKU_PARTS" ] && [ "$SCAN_HAIKU_LOADER" != 1 ] && \
+       ! grep -qi '^image=.*haiku' "$ENTRIES_DIR"/70-*.conf 2>/dev/null; then
+        info "Haiku found on$HAIKU_PARTS, but no Haiku boot loader on an ESP.
+  Haiku keeps haiku_loader.efi inside its system package, which cannot be
+  read from Linux. Take it from the Haiku ISO of the same release (the file
+  EFI/BOOT/BOOTX64.EFI in its EFI boot image) or, from a running Haiku,
+  /boot/system/data/platform_loaders/haiku_loader.efi, then run:
+    update-elilo --add-efi haiku \"Haiku\" /path/to/haiku_loader.efi"
+    fi
 
     if [ -z "$SCAN_FOUND" ]; then
         info "no other OS or boot loader found"
@@ -975,16 +1006,6 @@ EOF
             read -r _ans </dev/tty || _ans=n
             case $_ans in n|N|no|NO) continue ;; esac
         fi
-        for _c in $HAIKU_COPIES; do
-            if [ "${_c%%|*}" = "$_lbl" ]; then
-                _rest=${_c#*|}
-                _src=${_rest%%|*}
-                _dir=${_rest#*|}
-                mkdir -p "$ESP_ROOT/$_dir"
-                install -m 644 "$_src" "$ESP_ROOT/$_dir/haiku_loader.efi"
-                info "copied $_src to $ESP_ROOT/$_dir/haiku_loader.efi"
-            fi
-        done
         write_chainload_entry "$ENTRIES_DIR/60-scan-$_lbl.conf" "$_lbl" "$_desc" "$_path" "$_dev"
         sed -i '1i # managed by update-elilo --scan; re-run it to refresh' "$ENTRIES_DIR/60-scan-$_lbl.conf"
     done

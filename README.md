@@ -81,6 +81,18 @@ make ARCH=x86_64
 
 This produces `elilo.efi` in the top-level directory.
 
+To build the release tarball used in [Quick Install](#quick-install):
+
+```bash
+./release-tarball.sh 3.18      # writes elilo-3.18.tar.gz
+```
+
+The update-elilo tests need no root and no real disks:
+
+```bash
+sh tests/run.sh
+```
+
 ---
 
 ## Installation
@@ -234,16 +246,46 @@ sudo update-elilo --scan --yes    # adds everything found
   removable-media loader `EFI/BOOT/BOOTX64.EFI` when nothing else is there.
   ESPs that are not mounted are mounted read-only for the scan and unmounted
   afterwards.
-- **Haiku** (BFS partitions). Haiku usually has no ESP of its own, so its
-  `haiku_loader.efi` is copied onto elilo's ESP; the loader then finds the
-  Haiku volume by itself. This needs the `befs` kernel module, which most
-  distribution kernels ship. Re-run `--scan` after upgrading Haiku so the
-  loader matches the installed version.
+- **Haiku** loaders already on an ESP: `EFI/HAIKU/BOOTX64.EFI` (the layout
+  from Haiku's guide), any `EFI/haiku*/haiku_loader*.efi`, or a removable-media
+  loader that is Haiku's. See [Haiku](#haiku) below for a Haiku install that has
+  no ESP of its own.
 
 Entries found by `--scan` are chainloaded: elilo starts that boot loader,
 which boots its OS. They are located by PARTUUID, so they keep working when
 disks are renumbered. Running `--scan` again replaces everything the previous
 scan added.
+
+#### Haiku
+
+Haiku's EFI loader finds the Haiku partition by itself, so it does not need
+to be on the same disk: it can sit on elilo's ESP. A Haiku install without an
+ESP of its own works like this. Two things to know:
+
+- **Getting the loader.** Haiku keeps `haiku_loader.efi` inside its system
+  package, which cannot be read from Linux, so `--scan` cannot copy it from
+  the Haiku partition. Take it from the Haiku ISO of the same release, where
+  it is `EFI/BOOT/BOOTX64.EFI` in the ISO's EFI boot image:
+
+  ```bash
+  xorriso -osirrox on -indev haiku-*.iso -extract_boot_images bootimg/
+  mcopy -i bootimg/eltorito_img2_uefi.img ::/EFI/BOOT/BOOTX64.EFI haiku_loader.efi
+  sudo update-elilo --add-efi haiku "Haiku" haiku_loader.efi
+  ```
+
+  From a running Haiku the same file is
+  `/boot/system/data/platform_loaders/haiku_loader.efi`. Add it again after
+  upgrading Haiku so the loader matches the installed release.
+- **Partition type.** On a GPT disk Haiku's loader only picks a partition by
+  itself when its type is *Haiku BFS*
+  (`42465331-3ba3-10f1-802a-4861696b7521`). If the Haiku partition has another
+  type, for example *EFI System*, the loader stops at its menu with no boot
+  volume selected. `--scan` warns about this and prints the fix, which changes
+  only the partition type, not the data:
+
+  ```bash
+  sudo sfdisk --part-type /dev/sdX N 42465331-3ba3-10f1-802a-4861696b7521
+  ```
 
 #### Adding or removing entries by hand
 
@@ -814,8 +856,10 @@ elilo prints the error and goes back to the menu.
 - **Arch family** support (`LAYOUT=arch`): pkgbase-named kernels, microcode
   prepended to the initramfs, optional fallback initramfs entries, and a
   pacman hook.
-- `--scan` finds Windows, other boot loaders and Haiku; `--add-efi` and
-  `--remove-entry` manage chainload entries by hand.
+- `--scan` finds Windows, other boot loaders and Haiku loaders on any ESP,
+  and warns when a Haiku partition has a type Haiku's loader will not boot
+  from; `--add-efi` and `--remove-entry` manage chainload entries by hand.
+- `tests/`: update-elilo test suites (`sh tests/run.sh`), no root needed.
 - btrfs: the `[/subvol]` suffix printed by `findmnt` is stripped from the root
   device, and `rootflags=subvol=...` is added when missing.
 - ESP space is checked before copying; unchanged files are not rewritten.

@@ -1,0 +1,10 @@
+#!/bin/sh
+# test shim: answers the findmnt queries update-elilo makes
+case "$*" in
+  *"-o SOURCE /")  echo "${SHIM_ROOT_SOURCE:-/dev/vda2}" ;;
+  *"-o FSTYPE /")  echo "${SHIM_ROOT_FSTYPE:-ext4}" ;;
+  *"-o FSROOT /")  echo "${SHIM_ROOT_FSROOT:-/}" ;;
+  *"-o SOURCE "*)  echo "${SHIM_ESP_SOURCE:-/dev/vda1}" ;;
+  *"-o UUID /")    echo "${SHIM_ROOT_UUID:-1111-2222}" ;;
+  *) exit 1 ;;
+esac

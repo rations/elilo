@@ -25,8 +25,11 @@
 	  into elilo.conf with duplicate-label and missing-default checks.
 	  LAYOUT=arch for pkgbase-named kernels with microcode prepended to the
 	  initramfs. --scan (Windows, GRUB/shim, systemd-boot, Limine, rEFInd,
-	  removable-media loaders on any ESP; Haiku on BFS, including BFS
-	  partitions typed as ESP), --add-efi, --remove-entry. ESP space check,
+	  removable-media loaders and Haiku loaders on any ESP; a warning with
+	  the sfdisk fix when a BFS partition does not have the Haiku BFS GPT
+	  type, which Haiku's loader needs to boot it without its menu; how to
+	  get haiku_loader.efi, which only exists inside Haiku's system
+	  package), --add-efi, --remove-entry. ESP space check,
 	  unchanged files left alone, btrfs [subvol] stripped from the root
 	  device and rootflags=subvol= added. Configs without OS_ID keep the
 	  3.17 behaviour and output.
@@ -40,6 +43,10 @@
 	  (no efibootmgr, no global settings), offer to run --scan. Only
 	  POSIX sh, util-linux and efibootmgr; no systemd.
 	* release-tarball.sh: elilo-<version>.tar.gz, includes the pacman hook.
+	  Release tarballs are no longer kept in git.
+	* tests/: update-elilo test suites (legacy output identical to 3.17.2,
+	  fragment mode, --scan, ESP root detection) using shims and fixture
+	  trees; run with sh tests/run.sh.
 	* README.md: install for any distribution, boot menu, multi-boot,
 	  chainloading, Changes in 3.18.
 

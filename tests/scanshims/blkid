@@ -1,0 +1,4 @@
+#!/bin/sh
+# test shim: blkid -p -o value -s KEY DEV
+key=$5; dev=$6
+awk -v d="$dev" -v k="$key" '$1 == d { if (k == "PART_ENTRY_TYPE") print toupper($2); if (k == "PART_ENTRY_UUID") print $3; if (k == "TYPE") print $4; if (k == "PART_ENTRY_NUMBER" && $7 != "") print $7 }' "$SHIM_DISKS"
