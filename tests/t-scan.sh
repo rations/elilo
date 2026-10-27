@@ -96,5 +96,13 @@ scan
 check '[ "$(grep -c "label=haiku" "$C")" = 1 ] && grep -q "^image=/EFI/haiku/haiku_loader.efi$" "$C"' "listed once, not rescanned"
 check '! grep -q "no Haiku boot loader" "$T/out"' "no loader hint"
 
+echo "Haiku partition gone (disk replaced)"
+sed -i '/^\/dev\/fake-haiku /d' "$T/disks"
+mkdir -p "$ESP/EFI/haiku-33333333"; echo h > "$ESP/EFI/haiku-33333333/haiku_loader.efi"
+scan
+check '! grep -qi "label=haiku" "$ED/entries"/60-scan-*.conf && grep -q "EFI/haiku-33333333/haiku_loader.efi.*no Haiku (BFS) partition" "$T/out"' "loader on an ESP not offered without Haiku"
+check 'grep -q "haiku .*no Haiku (BFS) partition" "$T/out" && grep -q "update-elilo --remove-entry haiku$" "$T/out" && [ -f "$ED/entries/70-haiku.conf" ]' "--add-efi entry reported stale, kept with --yes"
+check '! grep -q "Haiku found on" "$T/out"' "no loader hint"
+
 sed 's/^/    out: /' "$T/out"
 exit $fails
