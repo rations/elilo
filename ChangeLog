@@ -1,6 +1,7 @@
 2026-10-27 rations <ehqcar@proton.me>
 	Developed with Claude Opus 5.5 (Anthropic) as AI development assistant.
-	* Fedora family support and removal of stale menu entries
+	* elilo 3.19 — Fedora family support and removal of stale menu entries
+	* elilo.h: ELILO_VERSION 3.19.
 	* scripts/update-elilo: LAYOUT=fedora (/boot/vmlinuz-<version> with a
 	  dracut /boot/initramfs-<version>.img); dracut's rescue kernel is never
 	  taken for a version, and becomes an <OS_ID>-rescue entry with

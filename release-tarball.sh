@@ -2,7 +2,7 @@
 # release-tarball.sh — build a release tarball (any distribution)
 #
 # Usage:  ./release-tarball.sh <version>
-# Example: ./release-tarball.sh 3.18
+# Example: ./release-tarball.sh 3.19
 #
 # Creates: elilo-<version>.tar.gz in the current directory.
 
@@ -11,7 +11,7 @@ set -e
 VERSION="$1"
 if [ -z "$VERSION" ]; then
     echo "Usage: ./release-tarball.sh <version>" >&2
-    echo "  Example: ./release-tarball.sh 3.18" >&2
+    echo "  Example: ./release-tarball.sh 3.19" >&2
     exit 1
 fi
 

@@ -1,12 +1,12 @@
-# elilo 3.18 — EFI Linux Loader
+# elilo 3.19 — EFI Linux Loader
 
-![elilo 3.18 boot menu: Devuan, CachyOS, GRUB and Haiku entries with a countdown](docs/boot-menu.png)
+![elilo boot menu: Devuan, CachyOS, GRUB and Haiku entries with a countdown](docs/boot-menu.png)
 
 elilo is an EFI/UEFI bootloader for Linux. It loads the kernel and initrd
 directly from the EFI System Partition (ESP) and passes control to the kernel
 via the EFI Handover Protocol.
 
-This is version 3.18. It boots Linux 6.x and 7.x kernels on modern UEFI
+This is version 3.19. It boots Linux 6.x and 7.x kernels on modern UEFI
 firmware and adds:
 
 - an **arrow-key boot menu** listing every entry while the timeout counts down
@@ -22,8 +22,9 @@ firmware and adds:
 Nothing depends on systemd: the scripts need only POSIX `sh`, util-linux and
 `efibootmgr`, so they work on sysvinit, OpenRC, runit and s6 systems alike.
 
-See [Changes in 3.18](#changes-in-318) and [Changes from 3.14](#changes-from-314)
-for a full account of what changed and why.
+See [Changes in 3.19](#changes-in-319), [Changes in 3.18](#changes-in-318)
+and [Changes from 3.14](#changes-from-314) for a full account of what changed
+and why.
 
 elilo is distributed under the GNU General Public License version 2 (or, at
 your option, any later version). See [License & Credits](#license--credits)
@@ -50,10 +51,11 @@ for the full list of copyright holders.
 4. [Automatic Kernel Updates](#automatic-kernel-updates)
 5. [Manual Kernel Updates](#manual-kernel-updates)
 6. [Partition Naming Reference](#partition-naming-reference)
-7. [Changes in 3.18](#changes-in-318)
-8. [Changes from 3.14](#changes-from-314)
-9. [Comparison with Slackware 15.0](#comparison-with-slackware-150)
-10. [License & Credits](#license--credits)
+7. [Changes in 3.19](#changes-in-319)
+8. [Changes in 3.18](#changes-in-318)
+9. [Changes from 3.14](#changes-from-314)
+10. [Comparison with Slackware 15.0](#comparison-with-slackware-150)
+11. [License & Credits](#license--credits)
 
 ---
 
@@ -90,7 +92,7 @@ This produces `elilo.efi` in the top-level directory.
 To build the release tarball used in [Quick Install](#quick-install):
 
 ```bash
-./release-tarball.sh 3.18      # writes elilo-3.18.tar.gz
+./release-tarball.sh 3.19      # writes elilo-3.19.tar.gz
 ```
 
 The update-elilo tests need no root and no real disks:
@@ -110,8 +112,8 @@ detects your distribution, ESP, root file system and kernel options, then
 handles everything in one command:
 
 ```bash
-tar -xf elilo-3.18.tar.gz
-cd elilo-3.18
+tar -xf elilo-3.19.tar.gz
+cd elilo-3.19
 sudo ./install-elilo.sh
 ```
 
@@ -176,7 +178,7 @@ Configs written by `update-elilo` use the `menu` chooser (`chooser=menu` in
 highlighted and a countdown underneath:
 
 ```
-ELILO 3.18 boot menu
+ELILO 3.19 boot menu
 
    1. Devuan GNU/Linux (7.0.12+deb14-amd64)
    2. Devuan GNU/Linux (6.12.111+deb13-amd64, previous)
@@ -959,6 +961,22 @@ Your layout may differ — always verify with `lsblk` or `fdisk -l`.
 
 ---
 
+## Changes in 3.19
+
+- **Fedora family** support (`LAYOUT=fedora`): `/boot/vmlinuz-<version>`
+  with a dracut initramfs, a `kernel-install` plugin
+  (`/etc/kernel/install.d/99-elilo.install`), and an optional entry for
+  Fedora's rescue kernel. See [How it works](#how-it-works).
+- **Stale menu entries**: `update-elilo --list` marks entries whose OS or
+  boot loader is no longer on any disk; `--remove-entry` removes a stale
+  OS's entries and kernels, and loaders that `--add-efi` copied; `--scan`
+  and the installer offer to remove them. See
+  [Removing an OS](#removing-an-os-stale-entries).
+- `--scan` no longer offers a Haiku loader when no Haiku partition exists.
+- `install-elilo.sh` offers to put elilo back first in the UEFI boot order
+  when another OS's installer has moved its own entry ahead, and its
+  messages keep the backslashes of EFI paths under dash.
+
 ## Changes in 3.18
 
 ### Boot menu (`choosers/menu.c`)
@@ -1306,7 +1324,7 @@ preserved in any redistribution:
 | 2005 | Hewlett-Packard Development Company, L.P. | Later HP entity name |
 | 2006 | Christoph Pfisterer | `console.c`, `console.h` |
 | 2006–2009 | Intel Corporation | `elilo.c`, `x86_64/sysdeps.h`, and others — contributed by Fenghua Yu, Bibo Mao, Chandramouli Narayanan, Mike Johnston, Chris Ahna |
-| 2026 | rations `<ehqcar@proton.me>` | Modernisation for Linux 6.x / modern UEFI (fixes 1–12); 3.18 menu, chainloading, multi-OS and Arch support |
+| 2026 | rations `<ehqcar@proton.me>` | Modernisation for Linux 6.x / modern UEFI (fixes 1–12); 3.18 menu, chainloading, multi-OS and Arch support; 3.19 Fedora support and stale-entry cleanup |
 
 ### Individual contributors credited in source headers
 
@@ -1326,4 +1344,4 @@ preserved in any redistribution:
 
 Version 3.17 modernisation developed with
 [Claude Sonnet 4.6](https://www.anthropic.com) (Anthropic) as AI development
-assistant; version 3.18 with Claude Opus 5.5.
+assistant; versions 3.18 and 3.19 with Claude Opus 5.5.
