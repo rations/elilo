@@ -4,6 +4,7 @@
 # Called automatically after kernel installs/removals:
 #   Debian family: /etc/kernel/postinst.d/zz-update-elilo, /etc/kernel/postrm.d/zz-update-elilo
 #   Arch family:   /etc/pacman.d/hooks/zz-update-elilo.hook
+#   Fedora family: /etc/kernel/install.d/99-elilo.install (run by kernel-install)
 # May also be run manually.
 #
 # Config: /etc/elilo/update.conf
@@ -13,8 +14,11 @@
 #   update-elilo --scan [--yes]     find other OSes / boot loaders and add menu entries
 #   update-elilo --add-efi LABEL "DESCRIPTION" FILE [--device PARTUUID]
 #                                   add a menu entry that chainloads an EFI binary
-#   update-elilo --remove-entry LABEL
-#                                   remove an entry added by --scan or --add-efi
+#   update-elilo --list             list the menu entries; flag those whose OS
+#                                   or boot loader is no longer on any disk
+#   update-elilo --remove-entry LABEL [--force]
+#                                   remove an entry added by --scan or --add-efi,
+#                                   or all entries of an OS that is gone
 #
 # Two modes, chosen by update.conf:
 #
@@ -83,6 +87,8 @@ kernel_versions() {
     for img in "$dir"/vmlinuz-*; do
         [ -e "$img" ] || continue
         base=${img##*/}
+        # dracut's rescue image (vmlinuz-0-rescue-<machine-id>) is no version
+        case $base in vmlinuz-*-rescue-*) continue ;; esac
         printf '%s\n' "${base#vmlinuz-}"
     done | {
         if command -v linux-version >/dev/null 2>&1; then
@@ -120,14 +126,17 @@ effective_append() {
 
 # ── Partition helpers (work without a udev database) ────────────────────────
 
-# part_field DEV PARTTYPE|PARTUUID|FSTYPE  → lower-case value, may be empty
+# part_field DEV PARTTYPE|PARTUUID|FSTYPE|UUID|LABEL|PARTLABEL
+#   → lower-case value, may be empty
 part_field() {
     _v=$(lsblk -dno "$2" "$1" 2>/dev/null | head -1)
     if [ -z "$_v" ]; then
         case $2 in
-            PARTTYPE) _k=PART_ENTRY_TYPE ;;
-            PARTUUID) _k=PART_ENTRY_UUID ;;
-            FSTYPE)   _k=TYPE ;;
+            PARTTYPE)  _k=PART_ENTRY_TYPE ;;
+            PARTUUID)  _k=PART_ENTRY_UUID ;;
+            FSTYPE)    _k=TYPE ;;
+            PARTLABEL) _k=PART_ENTRY_NAME ;;
+            *)         _k=$2 ;;
         esac
         _v=$(blkid -p -o value -s "$_k" "$1" 2>/dev/null | head -1)
     fi
@@ -429,6 +438,9 @@ emit_linux_entry() {
 }
 
 # ── Debian family: /boot/vmlinuz-<version>, /boot/initrd.img-<version> ─────
+# ── Fedora family: /boot/vmlinuz-<version>, /boot/initramfs-<version>.img ──
+# ELILO_REMOVED_KERNEL is set by the kernel-install hook on removal, as the
+# kernel may still be in /boot while the plugins run.
 
 sync_debian() {
     if [ -n "$1" ] && [ ! -f "$BOOT_DIR/vmlinuz-$1" ]; then
@@ -438,7 +450,8 @@ sync_debian() {
     fi
 
     # newest version is the default, the next one the fallback
-    _versions=$(kernel_versions "$BOOT_DIR" | head -n "$([ "$KEEP_PREVIOUS" = "1" ] && echo 2 || echo 1)")
+    _versions=$(kernel_versions "$BOOT_DIR" | grep -Fxv "${ELILO_REMOVED_KERNEL:-}" \
+        | head -n "$([ "$KEEP_PREVIOUS" = "1" ] && echo 2 || echo 1)")
     if [ -z "$_versions" ]; then
         warn "no kernel found in $BOOT_DIR"
         return 1
@@ -453,8 +466,12 @@ sync_debian() {
             plan_copy "initrd.img-$_v" "$_initrd"
             _iname="initrd.img-$_v"
         else
+            case $LAYOUT in
+                fedora) _mk="dracut -f --kver $_v" ;;
+                *)      _mk="update-initramfs -c -k $_v" ;;
+            esac
             warn "no initrd found for $_v in $BOOT_DIR — it will most likely not boot.
-  Run: update-initramfs -c -k $_v, then re-run update-elilo."
+  Run: $_mk, then re-run update-elilo."
             _iname=""
         fi
         if [ $_n -eq 1 ]; then
@@ -465,6 +482,24 @@ sync_debian() {
 "
         fi
     done
+
+    # dracut's generic rescue image, made once at install time
+    if [ "$LAYOUT" = "fedora" ] && [ "$INCLUDE_FALLBACK" = "1" ]; then
+        for _r in "$BOOT_DIR"/vmlinuz-0-rescue-*; do
+            [ -f "$_r" ] || continue
+            _rn=${_r##*/}
+            _ri="initramfs-${_rn#vmlinuz-}.img"
+            if [ ! -f "$BOOT_DIR/$_ri" ]; then
+                warn "no $BOOT_DIR/$_ri, rescue entry skipped"
+                break
+            fi
+            plan_copy "$_rn" "$_r"
+            plan_copy "$_ri" "$BOOT_DIR/$_ri"
+            ENTRIES="$ENTRIES$(emit_linux_entry "$OS_ID-rescue" "$OS_NAME (rescue)" "$_rn" "$_ri")
+"
+            break
+        done
+    fi
 }
 
 # ── Arch family: /usr/lib/modules/<version>/pkgbase → /boot/vmlinuz-<pkgbase>
@@ -649,9 +684,9 @@ fragment_update() {
     ENTRIES=""
 
     case $LAYOUT in
-        debian) sync_debian "$1" || exit 0 ;;
-        arch)   sync_arch || exit 0 ;;
-        *)      die "unknown LAYOUT '$LAYOUT' in $CONFIG (expected debian or arch)" ;;
+        debian|fedora) sync_debian "$1" || exit 0 ;;
+        arch)          sync_arch || exit 0 ;;
+        *)             die "unknown LAYOUT '$LAYOUT' in $CONFIG (expected debian, fedora or arch)" ;;
     esac
 
     check_space
@@ -682,6 +717,9 @@ fragment_update() {
 # ═════════════════════════════════════════════════════════════════════════════
 #  --add-efi / --remove-entry
 # ═════════════════════════════════════════════════════════════════════════════
+
+# marks an entry whose loader --add-efi copied onto the ESP
+COPIED_MARK="# copied by update-elilo --add-efi, deleted by --remove-entry"
 
 # write_chainload_entry FILE LABEL DESCRIPTION ESP-PATH [PARTUUID]
 write_chainload_entry() {
@@ -714,6 +752,7 @@ add_efi() {
         die "label '$_label' is already used in $_used"
     fi
 
+    _copied=0
     if [ -n "$_device" ]; then
         # FILE is a path on that partition, not copied
         case $_file in /*) ;; *) _file="/$_file" ;; esac
@@ -729,28 +768,204 @@ add_efi() {
                 mkdir -p "$ESP_ROOT/EFI/$_label"
                 install -m 644 "$_abs" "$ESP_ROOT/EFI/$_label/${_abs##*/}"
                 _path="/EFI/$_label/${_abs##*/}"
+                _copied=1
                 info "copied $_abs to $ESP_ROOT$_path"
                 ;;
         esac
     fi
 
     write_chainload_entry "$_frag" "$_label" "$_desc" "$_path" "$_device"
+    [ $_copied -eq 0 ] || sed -i "1a $COPIED_MARK" "$_frag"
     info "added entry '$_label' ($_desc)"
     assemble_conf
 }
 
+# ═════════════════════════════════════════════════════════════════════════════
+#  Entries whose OS or boot loader is gone: --list, --remove-entry
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ID_TABLE lines: dev|fstype|uuid|partuuid|label|partlabel, for every block
+# device. ID_OPAQUE=1 when a locked encrypted/LVM/RAID volume may hide more.
+ID_TABLE=""
+ID_OPAQUE=0
+
+# load_ids — fill ID_TABLE (call outside $(...) so it is kept)
+load_ids() {
+    [ -n "$ID_TABLE" ] && return 0
+    ID_TABLE="
+"
+    for _d in $(lsblk -prno NAME 2>/dev/null | awk '{ print $1 }' | sort -u); do
+        _fs=$(part_field "$_d" FSTYPE)
+        case $_fs in
+            crypto_luks|lvm2_member|linux_raid_member|zfs_member|bcache|*_raid_member)
+                # open when something is stacked on it
+                _h=/sys/class/block/$(basename "$(readlink -f "$_d")")/holders
+                [ -n "$(ls "$_h" 2>/dev/null)" ] || ID_OPAQUE=1
+                ;;
+        esac
+        ID_TABLE="$ID_TABLE$_d|$_fs|$(part_field "$_d" UUID)|$(part_field "$_d" PARTUUID)|$(part_field "$_d" LABEL)|$(part_field "$_d" PARTLABEL)
+"
+    done
+}
+
+# id_present COLUMN VALUE — COLUMN of ID_TABLE: 2 fstype, 3 uuid, 4 partuuid,
+# 5 label, 6 partlabel
+id_present() {
+    printf '%s' "$ID_TABLE" | awk -F'|' -v c="$1" -v w="$(printf '%s' "$2" | tr 'A-Z' 'a-z')" \
+        '$c == w { found = 1 } END { exit !found }'
+}
+
+# entries written by update-elilo for an OS carry "# root: <device>"
+is_os_fragment() {
+    grep -q '^# root: ' "$1" 2>/dev/null
+}
+
+# os_frag_id FILE → OS_ID of an entries/NN-<OS_ID>.conf file
+os_frag_id() {
+    _b=${1##*/}
+    _b=${_b#*-}
+    printf '%s\n' "${_b%.conf}"
+}
+
+# entry_field FILE KEY → first KEY= value in FILE
+entry_field() {
+    sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*//p" "$1" | head -1 | tr -d '"'
+}
+
+# entry_labels FILE → "label|description" per image
+entry_labels() {
+    awk 'function flush() { if (l != "") print l "|" d; l = ""; d = "" }
+        /^[ \t]*image[ \t]*=/ { flush() }
+        /^[ \t]*label[ \t]*=/ { sub(/^[^=]*=[ \t]*/, ""); gsub(/"/, ""); l = $0 }
+        /^[ \t]*description[ \t]*=/ { sub(/^[^=]*=[ \t]*/, ""); gsub(/"/, ""); d = $0 }
+        END { flush() }' "$1"
+}
+
+# root_status ROOT → ok | STALE: ... | unknown: ...
+root_status() {
+    case $1 in
+        UUID=*)      id_present 3 "${1#UUID=}" && { echo ok; return; } ;;
+        PARTUUID=*)  id_present 4 "${1#PARTUUID=}" && { echo ok; return; } ;;
+        LABEL=*)     id_present 5 "${1#LABEL=}" && { echo ok; return; } ;;
+        PARTLABEL=*) id_present 6 "${1#PARTLABEL=}" && { echo ok; return; } ;;
+        /dev/*)      [ -b "$1" ] && { echo ok; return; } ;;
+        *)           echo ok; return ;;
+    esac
+    if [ "$ID_OPAQUE" = "1" ]; then
+        echo "unknown: root $1 not found, it may be inside a locked encrypted, LVM or RAID volume"
+    else
+        echo "STALE: root $1 is not on any disk"
+    fi
+}
+
+# entry_status FILE → ok | STALE: <reason> | unknown: <reason>  (needs load_ids)
+entry_status() {
+    if is_os_fragment "$1"; then
+        if [ "$(os_frag_id "$1")" = "$OS_ID" ]; then
+            echo ok
+        else
+            root_status "$(sed -n 's/^# root: //p' "$1" | head -1)"
+        fi
+        return
+    fi
+    _img=$(entry_field "$1" image)
+    _dev=$(entry_field "$1" device)
+    if [ -n "$_dev" ]; then
+        if ! id_present 4 "$_dev"; then
+            echo "STALE: partition $_dev is not on any disk"
+            return
+        fi
+    elif [ -n "$_img" ] && [ ! -f "$ESP_ROOT$_img" ]; then
+        echo "STALE: $_img is missing on the ESP"
+        return
+    fi
+    # Haiku's loader sits on an ESP, apart from the Haiku partition
+    if printf '%s' "$_img" | grep -qi haiku || \
+       { [ -z "$_dev" ] && grep -q 'Haiku boot loader' "$ESP_ROOT$_img" 2>/dev/null; }; then
+        if ! id_present 2 befs; then
+            echo "STALE: no Haiku (BFS) partition on any disk"
+            return
+        fi
+    fi
+    echo ok
+}
+
+# drop_entry FILE — remove an entries file and what update-elilo put on the
+# ESP for it: an OS's kernel directory, a loader copied by --add-efi
+drop_entry() {
+    _f=$1
+    _lbls=$(entry_labels "$_f" | cut -d'|' -f1 | tr '\n' ' ')
+    if is_os_fragment "$_f"; then
+        _id=$(os_frag_id "$_f")
+        case $_id in
+            ''|.|..|entries) ;;
+            *)
+                if [ -d "$ELILO_DIR/$_id" ]; then
+                    rm -rf "${ELILO_DIR:?}/$_id"
+                    info "removed $ELILO_DIR/$_id"
+                fi
+                ;;
+        esac
+        if grep -q "written by update-elilo on $_id\.$" "$GLOBAL_FRAG" 2>/dev/null; then
+            rm -f "$GLOBAL_FRAG"
+            info "the global menu settings came from $_id; they now come from $OS_ID
+  (set GLOBAL_OWNER=1 in $CONFIG to keep managing them from here)"
+        fi
+    else
+        _img=$(entry_field "$_f" image)
+        if grep -qxF "$COPIED_MARK" "$_f"; then
+            rm -f "$ESP_ROOT$_img"
+            rmdir "$(dirname "$ESP_ROOT$_img")" 2>/dev/null || true
+            info "removed $_img from the ESP"
+        elif [ -z "$(entry_field "$_f" device)" ] && [ -f "$ESP_ROOT$_img" ]; then
+            info "left $_img on the ESP (not copied there by update-elilo)"
+        fi
+    fi
+    rm -f "$_f"
+    info "removed entry ${_lbls% }"
+}
+
+list_entries() {
+    need_fragment_mode "--list"
+    check_esp
+    [ "$(id -u)" = "0" ] || die "--list must be run as root (it reads the disks)"
+    load_ids
+    echo "update-elilo: menu entries in $ENTRIES_DIR:"
+    for _f in "$ENTRIES_DIR"/*.conf; do
+        [ -f "$_f" ] || continue
+        [ "$_f" = "$GLOBAL_FRAG" ] && continue
+        _st=$(entry_status "$_f")
+        entry_labels "$_f" | while IFS='|' read -r _l _d; do
+            printf '  %-18s %-40s %-20s %s\n' "$_l" "${_d:-$_l}" "${_f##*/}" "$_st"
+        done
+    done
+}
+
+# remove_entry LABEL FORCE(0|1)
 remove_entry() {
     need_fragment_mode "--remove-entry"
     check_esp
     [ -n "$1" ] || usage
     _f=$(label_in_use "$1")
     [ -n "$_f" ] || die "no entry with label '$1'"
-    case ${_f##*/} in
-        60-scan-*|70-*) ;;
-        *) die "'$1' is managed by update-elilo on its OS (${_f##*/}); it cannot be removed here" ;;
-    esac
-    rm -f "$_f"
-    info "removed entry '$1'"
+    if is_os_fragment "$_f"; then
+        _id=$(os_frag_id "$_f")
+        [ "$_id" != "$OS_ID" ] || \
+            die "'$1' belongs to this OS ($OS_ID); update-elilo rewrites it on every kernel update"
+        if [ "$2" != "1" ]; then
+            [ "$(id -u)" = "0" ] || die "--remove-entry must be run as root (it reads the disks)"
+            load_ids
+            _st=$(entry_status "$_f")
+            case $_st in
+                STALE:*) ;;
+                ok) die "'$1' belongs to $_id, which is still on this machine.
+  Remove it with update-elilo on $_id, or pass --force to remove it anyway." ;;
+                *)  die "'$1' belongs to $_id: ${_st#unknown: }.
+  Pass --force to remove it anyway." ;;
+            esac
+        fi
+    fi
+    drop_entry "$_f"
     assemble_conf
 }
 
@@ -885,18 +1100,21 @@ scan_esp() {
             _desc="$_name Boot Manager"
         elif [ "$_kind" = "Haiku" ]; then
             _desc="Haiku"
-            SCAN_HAIKU_LOADER=1
         else
             _desc="$_name ($_kind)"
+        fi
+        _dev=""
+        [ "$3" = "1" ] || _dev=$4
+        if [ "$_kind" = "Haiku" ]; then
+            scan_haiku_loader "$_desc" "/${_loader#"$_mnt"/}" "$_dev" "$1"
+            _found_here=1
+            continue
         fi
         # "<vendor>-<loader>" so it cannot clash with an OS's own label
         case $_kind in
             "Boot Manager") _lbl=$(unique_label "$([ "$_lv" = microsoft ] && echo windows || echo "$_vendor")") ;;
-            Haiku)          _lbl=$(unique_label haiku) ;;
             *)              _lbl=$(unique_label "$_vendor-$(printf '%s' "$_kind" | tr 'A-Z' 'a-z')") ;;
         esac
-        _dev=""
-        [ "$3" = "1" ] || _dev=$4
         scan_add "$_lbl" "$_desc" "/${_loader#"$_mnt"/}" "$_dev" "$1"
         _found_here=1
     done
@@ -905,8 +1123,7 @@ scan_esp() {
     if [ $_found_here -eq 0 ] && [ "$3" != "1" ]; then
         _hit=$(find "$_efidir" -maxdepth 2 -type f -ipath '*/boot/bootx64.efi' 2>/dev/null | head -1)
         if [ -n "$_hit" ] && grep -q 'Haiku boot loader' "$_hit" 2>/dev/null; then
-            scan_add "$(unique_label haiku)" "Haiku" "/${_hit#"$_mnt"/}" "$4" "$1"
-            SCAN_HAIKU_LOADER=1
+            scan_haiku_loader "Haiku" "/${_hit#"$_mnt"/}" "$4" "$1"
         elif [ -n "$_hit" ]; then
             _lbl=$(unique_label "efi-$(printf '%s' "$4" | cut -c1-8)")
             scan_add "$_lbl" "EFI loader on $1" "/${_hit#"$_mnt"/}" "$4" "$1"
@@ -940,6 +1157,69 @@ scan_haiku() {
 HAIKU_PARTS=""
 SCAN_HAIKU_LOADER=0
 
+# A Haiku loader is only worth an entry if a Haiku partition exists, which
+# is known once every partition has been seen.
+#   SCAN_HAIKU_PENDING lines: description|esp-path|partuuid|where
+SCAN_HAIKU_PENDING=""
+
+scan_haiku_loader() {
+    SCAN_HAIKU_PENDING="$SCAN_HAIKU_PENDING$1|$2|$3|$4
+"
+    SCAN_HAIKU_LOADER=1
+}
+
+scan_add_haiku_loaders() {
+    _oldifs=$IFS
+    IFS='
+'
+    for _e in $SCAN_HAIKU_PENDING; do
+        IFS='|' read -r _desc _path _dev _where <<EOF
+$_e
+EOF
+        IFS='
+'
+        if [ -n "$HAIKU_PARTS" ]; then
+            scan_add "$(unique_label haiku)" "$_desc" "$_path" "$_dev" "$_where"
+        else
+            info "Haiku boot loader $_path on $_where, but no Haiku (BFS) partition on any disk: not added"
+        fi
+    done
+    IFS=$_oldifs
+}
+
+# scan_stale YES — offer to remove entries whose OS or loader is gone
+# (--scan entries are rebuilt anyway)
+scan_stale() {
+    load_ids
+    _hdr=0
+    for _f in "$ENTRIES_DIR"/*.conf; do
+        [ -f "$_f" ] || continue
+        case ${_f##*/} in 00-global.conf|60-scan-*) continue ;; esac
+        _st=$(entry_status "$_f")
+        case $_st in STALE:*) ;; *) continue ;; esac
+        _first=$(entry_labels "$_f" | head -1)
+        _lbl=${_first%%|*}
+        _desc=${_first#*|}
+        if [ $_hdr -eq 0 ]; then
+            echo "update-elilo: entries whose OS or boot loader is no longer on any disk:"
+            _hdr=1
+        fi
+        printf '  %-16s %s  (%s)\n' "$_lbl" "${_desc:-$_lbl}" "${_st#STALE: }"
+        if [ "$1" = "1" ]; then
+            echo "    kept; to remove it: update-elilo --remove-entry $_lbl"
+            continue
+        fi
+        if is_os_fragment "$_f"; then
+            printf '    remove %s from the menu, with its kernels on the ESP? [Y/n] ' "$(os_frag_id "$_f")"
+        else
+            printf '    remove it from the menu? [Y/n] '
+        fi
+        read -r _ans </dev/tty || _ans=n
+        case $_ans in n|N|no|NO) continue ;; esac
+        drop_entry "$_f"
+    done
+}
+
 scan_others() {
     need_fragment_mode "--scan"
     check_esp
@@ -970,6 +1250,8 @@ scan_others() {
             fi
         fi
     done
+
+    scan_add_haiku_loaders
 
     if [ -n "$HAIKU_PARTS" ] && [ "$SCAN_HAIKU_LOADER" != 1 ] && \
        ! grep -qi '^image=.*haiku' "$ENTRIES_DIR"/70-*.conf 2>/dev/null; then
@@ -1011,6 +1293,8 @@ EOF
     done
     IFS=$_oldifs
 
+    scan_stale "$_yes"
+
     scan_cleanup
     trap - EXIT INT TERM
     SCAN_MNTS=""
@@ -1040,7 +1324,12 @@ case ${1:-} in
         add_efi "${1:-}" "${2:-}" "${3:-}" "$_dev"
         ;;
     --remove-entry)
-        remove_entry "${2:-}"
+        _force=0
+        [ "${3:-}" = "--force" ] && _force=1
+        remove_entry "${2:-}" "$_force"
+        ;;
+    --list)
+        list_entries
         ;;
     -h|--help)
         usage

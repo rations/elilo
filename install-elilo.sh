@@ -18,10 +18,13 @@
 #       hooks/postinst.d, hooks/postrm.d → /etc/kernel/{postinst,postrm}.d/zz-update-elilo
 #     Arch family:
 #       hooks/pacman/zz-update-elilo.hook → /etc/pacman.d/hooks/
+#     Fedora family (kernel-install):
+#       hooks/kernel-install/99-elilo.install → /etc/kernel/install.d/
 #
 # Then runs update-elilo to copy the kernels and write elilo.conf, registers an
-# elilo UEFI boot entry via efibootmgr (first OS on the ESP only) and offers to
-# add other OSes found on the disks to the menu.
+# elilo UEFI boot entry via efibootmgr (first OS on the ESP only; later OSes
+# are offered to put it back first in the boot order), offers to add other
+# OSes found on the disks to the menu and to remove entries whose OS is gone.
 #
 # Needs only POSIX sh, util-linux and efibootmgr (no systemd).
 
@@ -45,9 +48,10 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-say()  { echo "install-elilo: $*"; }
-warn() { echo "install-elilo: WARNING: $*" >&2; }
-die()  { echo "install-elilo: $*" >&2; exit 1; }
+# printf, not echo: dash's echo eats the backslashes of EFI paths
+say()  { printf '%s\n' "install-elilo: $*"; }
+warn() { printf '%s\n' "install-elilo: WARNING: $*" >&2; }
+die()  { printf '%s\n' "install-elilo: $*" >&2; exit 1; }
 
 # ask QUESTION DEFAULT(y|n) → 0 for yes
 ask() {
@@ -86,12 +90,14 @@ FAMILY=other
 case " $ID $ID_LIKE " in
     *" arch "*)                          FAMILY=arch ;;
     *" debian "*|*" ubuntu "*)           FAMILY=debian ;;
+    *" fedora "*|*" rhel "*|*" centos "*) FAMILY=fedora ;;
 esac
 
 pkg_hint() {
     case $FAMILY in
         debian) echo "sudo apt install $1" ;;
         arch)   echo "sudo pacman -S $1" ;;
+        fedora) echo "sudo dnf install $1" ;;
         *)      echo "install '$1' with your package manager" ;;
     esac
 }
@@ -112,7 +118,7 @@ fi
 if ls /usr/lib/modules/*/pkgbase >/dev/null 2>&1; then
     LAYOUT=arch
 elif ls /boot/vmlinuz-* >/dev/null 2>&1; then
-    LAYOUT=debian
+    if [ "$FAMILY" = "fedora" ]; then LAYOUT=fedora; else LAYOUT=debian; fi
 else
     die "no kernel found as /boot/vmlinuz-<version> or /boot/vmlinuz-<pkgbase>.
   This distribution's kernel layout is not supported yet."
@@ -293,6 +299,14 @@ if [ "$FAMILY" = "arch" ] || command -v pacman >/dev/null 2>&1; then
     install -m 644 "$SCRIPT_DIR/hooks/pacman/zz-update-elilo.hook" /etc/pacman.d/hooks/zz-update-elilo.hook
     HOOKS="/etc/pacman.d/hooks/zz-update-elilo.hook"
     say "installed pacman hook to /etc/pacman.d/hooks/"
+elif [ "$FAMILY" = "fedora" ]; then
+    mkdir -p /etc/kernel/install.d
+    install -m 755 "$SCRIPT_DIR/hooks/kernel-install/99-elilo.install" /etc/kernel/install.d/99-elilo.install
+    HOOKS="/etc/kernel/install.d/99-elilo.install"
+    say "installed kernel-install plugin to /etc/kernel/install.d/"
+    command -v kernel-install >/dev/null 2>&1 || \
+        warn "kernel-install not found — the plugin only runs when your kernel packages call it.
+  Otherwise run 'sudo update-elilo' after every kernel upgrade."
 elif [ "$FAMILY" = "debian" ] || [ -d /etc/kernel/postinst.d ]; then
     mkdir -p /etc/kernel/postinst.d /etc/kernel/postrm.d
     install -m 755 "$SCRIPT_DIR/hooks/postinst.d/zz-update-elilo" /etc/kernel/postinst.d/zz-update-elilo
@@ -353,16 +367,42 @@ say "running update-elilo to copy the kernels and generate elilo.conf..."
 
 # ── Register UEFI boot entry ─────────────────────────────────────────────────
 
+# elilo_first — an OS installed later often puts its own boot entry first;
+# offer to move elilo's back to the front of BootOrder
+elilo_first() {
+    _out=$(efibootmgr 2>/dev/null) || return 0
+    _num=$(printf '%s\n' "$_out" | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\)[* ]\{0,1\} [Ee][Ll][Ii][Ll][Oo]\([[:space:]].*\)\{0,1\}$/\1/p' | head -1)
+    if [ -z "$_num" ]; then
+        warn "no UEFI boot entry labelled elilo found ('efibootmgr -v' lists them). To add one:
+  efibootmgr --create --disk <disk> --part <N> --label elilo --loader '\\EFI\\elilo\\elilo.efi'"
+        return 0
+    fi
+    _order=$(printf '%s\n' "$_out" | sed -n 's/^BootOrder: *//p' | head -1)
+    case $_order in
+        "$_num"|"$_num",*) return 0 ;;
+    esac
+    _rest=$(printf '%s\n' "$_order" | tr ',' '\n' | grep -vix "$_num" | paste -sd, -)
+    say "elilo (Boot$_num) is not first in the UEFI boot order ($_order)"
+    if ask "Put elilo first in the UEFI boot order?" y; then
+        if efibootmgr -o "$_num${_rest:+,$_rest}" >/dev/null; then
+            say "UEFI boot order is now $_num${_rest:+,$_rest}"
+        else
+            warn "efibootmgr -o failed — set the boot order in the firmware setup"
+        fi
+    fi
+}
+
 if [ "$OTHER_OS" = "1" ]; then
-    say "elilo is already set up on this ESP by another OS — not touching the UEFI boot entries"
+    say "elilo is already set up on this ESP by another OS — not creating a UEFI boot entry"
+    elilo_first
 elif [ -z "$ESP_DISK" ]; then
     echo ""
     say "skipping UEFI boot entry (ESP disk not detected)."
     echo "  Add it manually:"
-    echo "  efibootmgr --create --disk <disk> --part <N> --label elilo --loader '\\EFI\\elilo\\elilo.efi'"
+    printf '%s\n' "  efibootmgr --create --disk <disk> --part <N> --label elilo --loader '\\EFI\\elilo\\elilo.efi'"
 elif efibootmgr 2>/dev/null | grep -qi "elilo"; then
-    say "an elilo UEFI boot entry already exists — skipping efibootmgr"
-    echo "  Run 'efibootmgr -v' to verify."
+    say "an elilo UEFI boot entry already exists — not creating another"
+    elilo_first
 else
     EFI_LOADER=$(printf '%s\n' "${ELILO_DIR#"$ESP_ROOT"}/elilo.efi" | sed 's|/|\\|g')
     if efibootmgr --create \
@@ -381,7 +421,7 @@ fi
 
 echo ""
 if grep -q '^OS_ID=..*' /etc/elilo/update.conf && \
-   ask "Search the disks for other OSes and boot loaders (Windows, other Linux installs, Haiku, ...) to add to the menu?" y; then
+   ask "Search the disks for other OSes and boot loaders (Windows, other Linux installs, Haiku, ...) to add to the menu, and for entries whose OS is gone?" y; then
     /usr/local/sbin/update-elilo --scan $([ "$ASSUME_YES" = "1" ] && echo --yes) || \
         warn "scan failed — you can run 'sudo update-elilo --scan' later"
 fi

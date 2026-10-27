@@ -1,3 +1,32 @@
+2026-10-27 rations <ehqcar@proton.me>
+	Developed with Claude Opus 5.5 (Anthropic) as AI development assistant.
+	* Fedora family support and removal of stale menu entries
+	* scripts/update-elilo: LAYOUT=fedora (/boot/vmlinuz-<version> with a
+	  dracut /boot/initramfs-<version>.img); dracut's rescue kernel is never
+	  taken for a version, and becomes an <OS_ID>-rescue entry with
+	  INCLUDE_FALLBACK=1. ELILO_REMOVED_KERNEL leaves out a kernel that is
+	  being removed but still in /boot.
+	* scripts/update-elilo: --list shows every menu entry and marks those
+	  whose OS or loader is gone: an OS whose root file system is on no
+	  disk, a chainload entry whose device= partition is on no disk or whose
+	  loader file is missing, a Haiku loader with no BFS partition left. A
+	  root that may sit in a locked encrypted/LVM/RAID volume is reported
+	  as unknown, not stale. --remove-entry removes a stale OS's entries
+	  and kernel directory (--force for one that cannot be checked) and
+	  deletes loaders that --add-efi copied onto the ESP (now marked in the
+	  entry). --scan lists stale entries and asks before removing each;
+	  with --yes it only reports them. --scan no longer offers a Haiku
+	  loader when there is no Haiku partition.
+	* hooks/kernel-install/99-elilo.install: new, Fedora family.
+	* install-elilo.sh: Fedora family detection, LAYOUT=fedora and the
+	  kernel-install plugin; offers to put an existing elilo boot entry
+	  first in BootOrder (another OS's installer often moves its own entry
+	  ahead); messages printed with printf so dash keeps the backslashes of
+	  EFI paths.
+	* release-tarball.sh, scripts/elilo-update.conf, README.md: the above.
+	* tests: Fedora layout checks, t-stale.sh; the scan shims know file
+	  system UUIDs and labels.
+
 2026-10-13 rations <ehqcar@proton.me>
 	Developed with Claude Opus 5.5 (Anthropic) as AI development assistant.
 	* elilo 3.18 — boot menu, chainloading, multi-OS and Arch support

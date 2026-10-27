@@ -1,4 +1,5 @@
 #!/bin/sh
 # test shim: blkid -p -o value -s KEY DEV
 key=$5; dev=$6
-awk -v d="$dev" -v k="$key" '$1 == d { if (k == "PART_ENTRY_TYPE") print toupper($2); if (k == "PART_ENTRY_UUID") print $3; if (k == "TYPE") print $4; if (k == "PART_ENTRY_NUMBER" && $7 != "") print $7 }' "$SHIM_DISKS"
+awk -v d="$dev" -v k="$key" 'function v(x) { return x == "-" ? "" : x }
+  $1 == d { if (k == "PART_ENTRY_TYPE") print toupper($2); if (k == "PART_ENTRY_UUID") print $3; if (k == "TYPE") print $4; if (k == "PART_ENTRY_NUMBER") print v($7); if (k == "UUID") print v($8); if (k == "LABEL") print v($9) }' "$SHIM_DISKS"

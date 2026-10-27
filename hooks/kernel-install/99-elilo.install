@@ -1,0 +1,29 @@
+#!/bin/sh
+# /etc/kernel/install.d/99-elilo.install
+# Run by kernel-install when a kernel is added or removed (Fedora family,
+# from the kernel package scripts): $1 = add|remove, $2 = kernel version.
+# Sorts after the plugins that copy the kernel to /boot and build its
+# initramfs (20-grub, 50-dracut).
+#
+# To test manually (simulating a kernel install):
+#   sudo kernel-install add "$(uname -r)" "/lib/modules/$(uname -r)/vmlinuz"
+
+COMMAND="$1"
+KERNEL_VERSION="$2"
+
+[ -x /usr/local/sbin/update-elilo ] || exit 0
+
+# Do not let a failure here abort the kernel installation or removal.
+case $COMMAND in
+    add)
+        /usr/local/sbin/update-elilo "$KERNEL_VERSION" || \
+            echo "update-elilo: WARNING: update failed — run 'sudo update-elilo' manually" >&2
+        ;;
+    remove)
+        # the kernel may still be in /boot while the plugins run
+        ELILO_REMOVED_KERNEL="$KERNEL_VERSION" /usr/local/sbin/update-elilo || \
+            echo "update-elilo: WARNING: config regeneration failed — run 'sudo update-elilo' manually" >&2
+        ;;
+esac
+
+exit 0

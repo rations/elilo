@@ -102,5 +102,48 @@ mkdir -p "$T/shims2"; printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Avail
 PATH="$T/shims2:$PATH" BOOT_DIR=$T/deb-boot run "$T/deb.conf" > "$T/out9" 2>&1
 check 'grep -q "not enough space" "$T/out9" && cmp -s "$T/before" "$ED/elilo.conf" && [ ! -e "$ED/devuan/vmlinuz-8.0.0" ]' "full ESP: nothing changed"
 
+echo "fedora fragment (dracut initramfs, rescue kernel)"
+FB=$T/fed-boot; rm -rf "$FB"; mkdir -p "$FB"
+for v in 6.15.9-201.fc42.x86_64 6.16.12-200.fc42.x86_64 6.17.4-200.fc42.x86_64; do
+  echo "k $v" > "$FB/vmlinuz-$v"; echo "i $v" > "$FB/initramfs-$v.img"
+done
+echo rk > "$FB/vmlinuz-0-rescue-0123abcd"; echo ri > "$FB/initramfs-0-rescue-0123abcd.img"
+cat > "$T/fed.conf" <<EOC
+ELILO_DIR=$ED
+ESP_ROOT=$ESP
+OS_ID=fedora
+OS_NAME="Fedora Linux"
+LAYOUT=fedora
+ENTRY_ORDER=30
+GLOBAL_OWNER=0
+ROOT_DEV=UUID=cccc-dddd
+APPEND="ro rootflags=subvol=root rhgb quiet"
+EOC
+FF=$ED/entries/30-fedora.conf
+BOOT_DIR=$FB run "$T/fed.conf" > "$T/out10" 2>&1; echo "  rc=$?"
+check '[ -f "$ED/fedora/vmlinuz-6.17.4-200.fc42.x86_64" ] && [ "$(cat "$ED/fedora/initrd.img-6.17.4-200.fc42.x86_64")" = "i 6.17.4-200.fc42.x86_64" ]' "newest kernel + dracut initramfs copied"
+check 'grep -B1 "label=fedora$" "$FF" | grep -q vmlinuz-6.17.4 && grep -q "initrd=/EFI/elilo/fedora/initrd.img-6.17.4-200.fc42.x86_64" "$FF"' "fedora entry"
+check 'grep -B1 "label=fedora-old$" "$FF" | grep -q vmlinuz-6.16.12' "previous kernel is fedora-old, not the rescue kernel"
+check '! ls "$ED/fedora" | grep -q rescue && ! grep -q rescue "$FF" && [ ! -e "$ED/fedora/vmlinuz-6.15.9-201.fc42.x86_64" ]' "rescue and third kernel left out"
+check 'grep -q "append=\"ro rootflags=subvol=root rhgb quiet\"" "$FF"' "rootflags not duplicated"
+check '[ -f "$ED/devuan/vmlinuz-7.0.12+deb14-amd64" ] && grep -q "^default=devuan$" "$ED/elilo.conf" && grep -q "label=cachyos$" "$ED/elilo.conf"' "other OSes untouched"
+
+echo "fedora: INCLUDE_FALLBACK adds the rescue kernel"
+echo INCLUDE_FALLBACK=1 >> "$T/fed.conf"
+BOOT_DIR=$FB run "$T/fed.conf" > "$T/out11" 2>&1
+check 'grep -B1 "label=fedora-rescue$" "$FF" | grep -q "image=/EFI/elilo/fedora/vmlinuz-0-rescue-0123abcd" && grep -q "initrd=/EFI/elilo/fedora/initramfs-0-rescue-0123abcd.img" "$FF"' "fedora-rescue entry"
+check '[ -f "$ED/fedora/initramfs-0-rescue-0123abcd.img" ]' "rescue initramfs copied"
+sed -i '/^INCLUDE_FALLBACK=1/d' "$T/fed.conf"
+
+echo "fedora: kernel-install remove (kernel still in /boot)"
+ELILO_REMOVED_KERNEL=6.17.4-200.fc42.x86_64 BOOT_DIR=$FB run "$T/fed.conf" > "$T/out12" 2>&1
+check 'grep -B1 "label=fedora$" "$FF" | grep -q vmlinuz-6.16.12 && grep -B1 "label=fedora-old$" "$FF" | grep -q vmlinuz-6.15.9' "removed version skipped"
+check '[ ! -e "$ED/fedora/vmlinuz-6.17.4-200.fc42.x86_64" ] && [ ! -e "$ED/fedora/vmlinuz-0-rescue-0123abcd" ]' "its files pruned"
+
+echo "fedora: missing initramfs"
+rm "$FB/initramfs-6.17.4-200.fc42.x86_64.img"
+BOOT_DIR=$FB run "$T/fed.conf" > "$T/out13" 2>&1
+check 'grep -q "dracut -f --kver 6.17.4-200.fc42.x86_64" "$T/out13" && ! grep -q update-initramfs "$T/out13"' "dracut hint"
+
 echo "--- final elilo.conf ---"; sed 's/^/    /' "$ED/elilo.conf"
 exit $fails

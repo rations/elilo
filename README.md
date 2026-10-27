@@ -11,8 +11,10 @@ firmware and adds:
 
 - an **arrow-key boot menu** listing every entry while the timeout counts down
 - **automatic kernel updates** on the Debian family (Debian, Devuan, Ubuntu,
-  Mint, ...) and the Arch family (Arch, Artix, CachyOS, EndeavourOS, Manjaro, ...)
-- **one shared menu for several installed OSes** on the same ESP
+  Mint, ...), the Arch family (Arch, Artix, CachyOS, EndeavourOS, Manjaro, ...)
+  and the Fedora family (Fedora, RHEL, AlmaLinux, Rocky Linux, ...)
+- **one shared menu for several installed OSes** on the same ESP, with
+  entries for OSes that have since been removed found and cleaned up
 - **chainloading** of other EFI boot loaders — Windows, other distributions'
   GRUB / systemd-boot / Limine / rEFInd, Haiku — found automatically with
   `update-elilo --scan`
@@ -130,13 +132,18 @@ The script will:
   - Debian family: `/etc/kernel/{postinst,postrm}.d/zz-update-elilo`
     (also used on any distribution that runs `/etc/kernel/postinst.d`)
   - Arch family: `/etc/pacman.d/hooks/zz-update-elilo.hook`
+  - Fedora family: `/etc/kernel/install.d/99-elilo.install` (run by
+    `kernel-install` from the kernel packages)
 - Write `/etc/elilo/update.conf` with the detected values (`OS_ID`, `LAYOUT`,
   `ROOT_DEV=UUID=...`, `APPEND`, ...)
 - Copy the kernels and initrds to the ESP and generate `elilo.conf`
 - Register an `elilo` UEFI boot entry via `efibootmgr` (only for the first OS
-  on that ESP)
+  on that ESP). If the entry already exists but is not first in the boot
+  order, as happens after another OS's installer put its own entry first, it
+  offers to move elilo back to the front
 - Offer to search your disks for other OSes and boot loaders and add them to
-  the menu (see [Multi-boot](#multi-boot-other-oses-in-the-menu))
+  the menu, and to remove entries whose OS is no longer on any disk (see
+  [Multi-boot](#multi-boot-other-oses-in-the-menu))
 
 The kernel options default to those of the running kernel (minus `root=`,
 `initrd=` and `BOOT_IMAGE=`), so distribution specifics such as
@@ -152,13 +159,13 @@ then run `sudo update-elilo` and reboot to test.
 > the next update.
 
 > **Check the boot order before rebooting.** Creating a boot entry does not
-> guarantee the firmware tries it first, and if an `elilo` entry already exists
-> the installer skips `efibootmgr` entirely. Run `efibootmgr -v` and, if elilo
-> is not first in `BootOrder`, set it first with `sudo efibootmgr --bootorder
-> XXXX` — see [Checking and setting the boot order](#checking-and-setting-the-boot-order).
+> guarantee the firmware tries it first, and some firmware reorders entries on
+> its own. Run `efibootmgr -v` and, if elilo is not first in `BootOrder`, set
+> it first with `sudo efibootmgr --bootorder XXXX` — see
+> [Checking and setting the boot order](#checking-and-setting-the-boot-order).
 
-> If you prefer to install step by step — or your distribution is neither
-> Debian- nor Arch-based — see the manual installation sections below.
+> If you prefer to install step by step — or your distribution is not
+> Debian-, Arch- or Fedora-based — see the manual installation sections below.
 
 ---
 
@@ -301,9 +308,11 @@ touches the others' entries.
    sudo ./install-elilo.sh --esp /efi
    ```
 
-   It sees the existing menu, adds this OS after the others, leaves the UEFI
-   boot entries and global settings alone, and installs this distribution's
-   kernel hook.
+   It sees the existing menu, adds this OS after the others, leaves the
+   global settings alone and installs this distribution's kernel hook. It
+   does not create another UEFI boot entry; if this OS's own installer put
+   its boot loader first in the boot order (Fedora's and Ubuntu's do), it
+   offers to put elilo back in front.
 
 The global settings (`TIMEOUT`, `PROMPT`, `DEFAULT`) are taken from the OS
 whose `update.conf` has `GLOBAL_OWNER=1`. `DEFAULT` takes any label, e.g.
@@ -325,13 +334,14 @@ sudo update-elilo --scan --yes    # adds everything found
   afterwards.
 - **Haiku** loaders already on an ESP: `EFI/HAIKU/BOOTX64.EFI` (the layout
   from Haiku's guide), any `EFI/haiku*/haiku_loader*.efi`, or a removable-media
-  loader that is Haiku's. See [Haiku](#haiku) below for a Haiku install that has
-  no ESP of its own.
+  loader that is Haiku's, as long as a Haiku partition exists. See
+  [Haiku](#haiku) below for a Haiku install that has no ESP of its own.
 
 Entries found by `--scan` are chainloaded: elilo starts that boot loader,
 which boots its OS. They are located by PARTUUID, so they keep working when
 disks are renumbered. Running `--scan` again replaces everything the previous
-scan added.
+scan added. It also reports entries whose OS is gone — see
+[Removing an OS](#removing-an-os-stale-entries).
 
 #### Haiku
 
@@ -374,9 +384,41 @@ sudo update-elilo --add-efi haiku "Haiku" /path/to/haiku_loader.efi
 sudo update-elilo --add-efi windows "Windows" /EFI/Microsoft/Boot/bootmgfw.efi \
     --device 0a1b2c3d-1111-2222-3333-444455556666
 
-# remove an entry added by --scan or --add-efi
+# remove an entry added by --scan or --add-efi (a loader --add-efi copied
+# onto the ESP is deleted with it)
 sudo update-elilo --remove-entry windows
 ```
+
+#### Removing an OS: stale entries
+
+When an OS that shares the menu is wiped or its disk replaced, its entries
+stay in the menu: no `update-elilo` runs on it any more to take them out.
+`update-elilo` recognises such entries by what they point at:
+
+- an OS's entries, when its root file system (`root=UUID=...`, `PARTUUID=`,
+  `LABEL=` or a `/dev` path) is on no disk;
+- a chainload entry, when its `device=` partition is on no disk, or its
+  loader file is missing from elilo's ESP;
+- a Haiku loader, when no Haiku (BFS) partition is left.
+
+```bash
+sudo update-elilo --list                  # every entry, with "ok" or "STALE: <reason>"
+sudo update-elilo --remove-entry oldos    # all entries of a stale OS + its kernels
+```
+
+`--scan` (and so the installer) lists stale entries and asks before removing
+each one; with `--yes` it only reports them, since a disk that is merely
+unplugged looks the same. `--remove-entry` refuses an OS that is still
+present (remove it from that OS instead) and one it cannot check, such as an
+OS whose root is inside a locked encrypted, LVM or RAID volume; `--force`
+removes it anyway:
+
+```bash
+sudo update-elilo --remove-entry oldos --force
+```
+
+If the removed OS owned the global menu settings, they are taken over by the
+OS you run this on.
 
 #### Chainload entries in elilo.conf
 
@@ -736,7 +778,7 @@ Re-run `efibootmgr -v` to confirm the new order, then reboot.
 The most common complaint about elilo is being locked out after a kernel
 upgrade. The `update-elilo` script and kernel hooks in the `scripts/` and
 `hooks/` directories solve this: install them once and every kernel upgrade
-(`apt upgrade`, `pacman -Syu`, ...) automatically copies the new kernel to
+(`apt upgrade`, `pacman -Syu`, `dnf upgrade`, ...) automatically copies the new kernel to
 the ESP and regenerates `elilo.conf`, exactly as GRUB runs `update-grub`.
 
 ### How it works
@@ -755,6 +797,15 @@ the ESP and regenerates `elilo.conf`, exactly as GRUB runs `update-grub`.
   kernel gets an entry (`<OS_ID>` for `DEFAULT_KERNEL` or `linux`,
   `<OS_ID>-lts`, `<OS_ID>-zen`, ...). CPU microcode (`/boot/*-ucode.img`) is
   prepended to each initramfs, since elilo loads a single initrd.
+- **Fedora family** (`LAYOUT=fedora`; kernels named `/boot/vmlinuz-<version>`
+  with a dracut `/boot/initramfs-<version>.img`): the kernel packages run
+  `kernel-install`, which calls `/etc/kernel/install.d/99-elilo.install`
+  after its own plugins have put the kernel in `/boot` and built the
+  initramfs. As on Debian, the newest kernel is the default entry and the
+  next newest `<OS_ID>-old`; removing a kernel takes it off the ESP. Fedora's
+  rescue kernel (`vmlinuz-0-rescue-*`) gets an `<OS_ID>-rescue` entry with
+  `INCLUDE_FALLBACK=1`. An initramfs rebuilt by hand (`dracut -f`) is not
+  seen by the hook: run `sudo update-elilo` afterwards.
 
 Files that have not changed are not rewritten. If the ESP does not have room
 for the new files, `update-elilo` stops before touching `elilo.conf`.
@@ -781,7 +832,7 @@ Set these values to match your system (the file explains each one):
 ```sh
 OS_ID=debian                        # short name: kernels go in ELILO_DIR/<OS_ID>/
 OS_NAME="Debian GNU/Linux"          # shown in the menu
-LAYOUT=debian                       # debian or arch (see the comments in the file)
+LAYOUT=debian                       # debian, arch or fedora (see the comments in the file)
 ELILO_DIR=/boot/efi/EFI/elilo       # where elilo.efi lives on the ESP
 ROOT_DEV=UUID=...                   # findmnt -n -o UUID /  gives yours
 APPEND="ro quiet"                   # kernel parameters
@@ -805,6 +856,13 @@ sudo mkdir -p /etc/pacman.d/hooks
 sudo cp hooks/pacman/zz-update-elilo.hook /etc/pacman.d/hooks/
 ```
 
+Fedora family:
+
+```bash
+sudo mkdir -p /etc/kernel/install.d
+sudo install -m 755 hooks/kernel-install/99-elilo.install /etc/kernel/install.d/
+```
+
 **Step 4 — Run update-elilo once to generate the initial config:**
 
 ```bash
@@ -825,7 +883,8 @@ Distributions that name kernels `/boot/vmlinuz-<version>` (with an initrd
 called `initrd.img-<version>`, `initrd-<version>.img` or
 `initramfs-<version>.img`) can use `LAYOUT=debian`. If the distribution runs
 `/etc/kernel/postinst.d` hooks (Gentoo's installkernel does), the Debian hooks
-work as they are. Otherwise run `sudo update-elilo` after each kernel upgrade.
+work as they are; if its kernel packages call `kernel-install`, use the Fedora
+plugin. Otherwise run `sudo update-elilo` after each kernel upgrade.
 
 ---
 
